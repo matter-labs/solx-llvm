@@ -1,9 +1,7 @@
-name: Regression tests
+name: Regression Tests
 
 on:
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       commits-to-test:
@@ -36,21 +34,8 @@ jobs:
   target-machine:
     runs-on: ubuntu-latest
     outputs:
-      evm: ${{ steps.evm.outputs.machine }}
-      eravm: ${{ steps.eravm.outputs.machine }}
       default: ${{ steps.default.outputs.machine }}
     steps:
-
-      - name: Check for EraVM target
-        id: eravm
-        if: contains(github.event.pull_request.title, '[eravm]') || contains(github.event.pull_request.title, '[EraVM]')
-        run: echo "machine=eravm" | tee -a "${GITHUB_OUTPUT}"
-
-      - name: Check for EVM target
-        id: evm
-        if: contains(github.event.pull_request.title, '[evm]') || contains(github.event.pull_request.title, '[EVM]')
-        run: echo "machine=evm" | tee -a "${GITHUB_OUTPUT}"
-
       - name: Check for default target
         id: default
         shell: bash -ex {0}
@@ -125,7 +110,7 @@ jobs:
           base_sha: ${{ steps.previous-commit.outputs.sha }}
 
       - name: Install formatting requirements
-        run: python3 -m pip install -r ./llvm/utils/git/requirements_formatting_era_llvm.txt
+        run: python3 -m pip install -r ./llvm/utils/git/requirements_formatting_solx_llvm.txt
 
       - name: Run code formatter
         run: |
@@ -135,7 +120,7 @@ jobs:
           else
             TOKEN_PARAM="--token ${{ secrets.GITHUB_TOKEN }}"
           fi
-          python3 ./llvm/utils/git/code-format-helper-era-llvm.py ${TOKEN_PARAM} \
+          python3 ./llvm/utils/git/code-format-helper-solx-llvm.py ${TOKEN_PARAM} \
             --issue-number ${{ github.event.pull_request.number }} \
             --start-rev ${{ steps.previous-commit.outputs.sha }} \
             --end-rev ${{ matrix.commit }} \
@@ -167,12 +152,10 @@ jobs:
         run: echo "sha=$(git show --quiet --pretty='%H' ${{ matrix.commit }}^1)" | tee -a "${GITHUB_OUTPUT}"
 
       - name: Build LLVM
-        uses: matter-labs/era-compiler-ci/.github/actions/build-llvm@v1
+        uses: NomicFoundation/solx/.github/actions/build-llvm@main
         with:
-          default-target-triple: ${{ matrix.target }}
           enable-tests: true
           enable-assertions: true
-          clone-llvm: false
           ccache-key-type: 'static' # rotate ccache key every month
           sanitizer: ${{ inputs.llvm-sanitizer }}
           enable-valgrind: ${{ inputs.enable-valgrind }}
