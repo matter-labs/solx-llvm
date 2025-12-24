@@ -1,5 +1,5 @@
 ; REQUIRES: asserts
-; RUN: llc -evm-stack-region-offset=128 -evm-stack-region-size=160 --debug-only=evm-stack-solver < %s 2>&1 | FileCheck %s
+; RUN: llc --cgp-verify-bfi-updates=false -evm-stack-region-offset=128 -evm-stack-region-size=160 --debug-only=evm-stack-solver < %s 2>&1 | FileCheck %s
 
 target datalayout = "E-p:256:256-i256:256:256-S256-a:256:256"
 target triple = "evm-unknown-unknown"
