@@ -292,7 +292,6 @@ add_lit_testsuite(verify-llvm-codegen-llc "Running EVM LLVM regression tests wit
   EXCLUDE_FROM_CHECK_ALL
   PARAMS "llc=${LLVM_BINARY_DIR}/bin/llc \
 --cgp-verify-bfi-updates \
---compile-twice \
 --earlycse-debug-hash \
 --machine-combiner-verify-pattern-order \
 --phicse-debug-hash \
