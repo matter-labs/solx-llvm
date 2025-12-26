@@ -373,7 +373,7 @@ struct Config {
   bool relocatable;
   bool resolveGroups;
   // EVM local begin
-  bool evmAssembly;
+  bool evmAssembly = false;
   // EVM local end
   bool relrGlibc = false;
   bool relrPackDynRelocs = false;
