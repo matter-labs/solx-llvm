@@ -102,6 +102,11 @@ MCFixupKindInfo EVMAsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
        {"fixup_Data_i32",   0, 8 * 4, 0}
       }};
 
+  // Allow the generic 4-byte fixup kind, which is used
+  // in debug info.
+  if (Kind == FK_Data_4)
+    return MCAsmBackend::getFixupKindInfo(Kind);
+
   if (Kind < FirstTargetFixupKind)
     llvm_unreachable("Unexpected fixup kind");
 
@@ -116,9 +121,17 @@ std::optional<bool> EVMAsmBackend::evaluateFixup(const MCFragment &F,
                                                  MCValue &Target,
                                                  uint64_t &Value) {
   unsigned FixUpKind = Fixup.getKind();
-  assert(static_cast<unsigned>(FixUpKind - FirstTargetFixupKind) <
-             EVM::NumTargetFixupKinds &&
-         "Invalid kind!");
+  if (FixUpKind == FK_Data_4) {
+    assert(F.getParent()->getName().starts_with(".debug") &&
+           "Only debug info fixups should use FK_Data_4");
+    if ([[maybe_unused]] const MCSymbol *Sym = Target.getAddSym())
+      assert(Sym->isDefined() && Sym->getFragment()->getParent()->isText() &&
+             "Expected relocation in debug info against text section");
+  } else {
+    assert(static_cast<unsigned>(FixUpKind - FirstTargetFixupKind) <
+               EVM::NumTargetFixupKinds &&
+           "Invalid kind!");
+  }
 
   // The following fixups should be emited as relocations,
   // as they can only be resolved at link time.
@@ -126,14 +139,14 @@ std::optional<bool> EVMAsmBackend::evaluateFixup(const MCFragment &F,
     return false;
 
   Value = Target.getConstant();
+  if (const MCSymbol *Sym = Target.getAddSym())
+    Value += Asm->getSymbolOffset(*Sym);
+
   if (Value > std::numeric_limits<uint32_t>::max())
     report_fatal_error("Fixup value exceeds the displacement 2^32");
-
-  if (const MCSymbol *Sym = Target.getAddSym()) {
-    Value += Asm->getSymbolOffset(*Sym);
-    return true;
-  }
-  llvm_unreachable("Unexpected symbol");
+  if (Target.getSubSym())
+    llvm_unreachable("Unexpected sub symbol in fixup target");
+  return true;
 }
 
 void EVMAsmBackend::applyFixup(const MCFragment &F, const MCFixup &Fixup,

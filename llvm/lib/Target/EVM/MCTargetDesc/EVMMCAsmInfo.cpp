@@ -34,6 +34,9 @@ EVMMCAsmInfo::EVMMCAsmInfo(const Triple &TT) {
   CommentString = ";";
   SupportsDebugInformation = true;
 
+  // EVM does not use relocations for DWARF.
+  DwarfUsesRelocationsAcrossSections = false;
+
   initializeAtSpecifiers(atSpecifiers);
 }
 
