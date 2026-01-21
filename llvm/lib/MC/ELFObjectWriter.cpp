@@ -80,10 +80,6 @@ STATISTIC(DwoBytes, "Total size of sections written to .dwo file");
 
 struct ELFWriter;
 
-bool isDwoSection(const MCSectionELF &Sec) {
-  return Sec.getName().ends_with(".dwo");
-}
-
 class SymbolTableWriter {
   ELFWriter &EWriter;
   bool Is64Bit;
@@ -573,7 +569,10 @@ void ELFWriter::computeSymbolTable(const RevGroupMapTy &RevGroupMap) {
         continue;
       }
 
-      if (Mode == NonDwoOnly && isDwoSection(Section))
+      // EVM local begin
+      if (Mode == NonDwoOnly &&
+          OWriter.TargetObjectWriter->isDwoSection(Section))
+        // EVM local end
         continue;
       MSD.SectionIndex = Section.getOrdinal();
       assert(MSD.SectionIndex && "Invalid section index!");
@@ -1025,9 +1024,13 @@ uint64_t ELFWriter::writeObject() {
   SmallVector<MCSectionELF *> Relocations;
   for (MCSection &Sec : Asm) {
     MCSectionELF &Section = static_cast<MCSectionELF &>(Sec);
-    if (Mode == NonDwoOnly && isDwoSection(Section))
+    // EVM local begin
+    if (Mode == NonDwoOnly && OWriter.TargetObjectWriter->isDwoSection(Section))
+      // EVM local end
       continue;
-    if (Mode == DwoOnly && !isDwoSection(Section))
+    // EVM local begin
+    if (Mode == DwoOnly && !OWriter.TargetObjectWriter->isDwoSection(Section))
+      // EVM local end
       continue;
 
     // Remember the offset into the file for this section.
@@ -1311,11 +1314,15 @@ bool ELFObjectWriter::useSectionSymbol(const MCValue &Val,
 
 bool ELFObjectWriter::checkRelocation(SMLoc Loc, const MCSectionELF *From,
                                       const MCSectionELF *To) {
-  if (isDwoSection(*From)) {
+  // EVM local begin
+  if (TargetObjectWriter->isDwoSection(*From)) {
+    // EVM local end
     getContext().reportError(Loc, "A dwo section may not contain relocations");
     return false;
   }
-  if (To && isDwoSection(*To)) {
+  // EVM local begin
+  if (To && TargetObjectWriter->isDwoSection(*To)) {
+    // EVM local end
     getContext().reportError(Loc,
                              "A relocation may not refer to a dwo section");
     return false;

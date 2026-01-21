@@ -92,6 +92,12 @@ public:
     return false;
   }
 
+  // EVM local begin
+  virtual bool isDwoSection(const MCSectionELF &Sec) const {
+    return Sec.getName().ends_with(".dwo");
+  }
+  // EVM local end
+
   virtual void sortRelocs(std::vector<ELFRelocationEntry> &Relocs);
 
   /// \name Accessors
