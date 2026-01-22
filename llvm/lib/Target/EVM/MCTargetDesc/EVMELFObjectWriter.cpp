@@ -36,6 +36,10 @@ protected:
 
   unsigned getRelocType(const MCFixup &Fixup, const MCValue &Target,
                         bool IsPCRel) const override;
+
+  bool isDwoSection(const MCSectionELF &Sec) const override {
+    return Sec.getName().starts_with(".debug");
+  }
 };
 } // end of anonymous namespace
 

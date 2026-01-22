@@ -246,5 +246,7 @@ MCAsmBackend *llvm::createEVMMCAsmBackend(const Target &T,
                                           const MCSubtargetInfo &STI,
                                           const MCRegisterInfo &MRI,
                                           const MCTargetOptions &Options) {
+  if (!Options.SplitDwarfFile.empty())
+    report_fatal_error("EVM does not support split dwarf");
   return new EVMAsmBackend(T, STI, ELF::ELFOSABI_STANDALONE);
 }
