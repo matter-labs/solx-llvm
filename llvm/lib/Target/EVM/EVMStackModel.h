@@ -340,6 +340,9 @@ private:
 
 public:
   bool skipMI(const MachineInstr &MI) const {
+    if (MI.isDebugInstr())
+      return true;
+
     auto Opc = MI.getOpcode();
     // If the virtual register has the only definition, ignore this instruction,
     // as we create literal slots from the immediate value at the register uses.
