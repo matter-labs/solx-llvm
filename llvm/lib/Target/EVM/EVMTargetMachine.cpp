@@ -159,7 +159,11 @@ void EVMTargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
       [](FunctionPassManager &PM, OptimizationLevel Level) {
         if (Level.getSizeLevel() || Level.getSpeedupLevel() > 1)
           PM.addPass(MergeIdenticalBBPass());
-        if (Level.isOptimizingForSpeed())
+
+        // Don't run this pass if optimizing for size, since result of SHA3
+        // calls will be replaced with a 32-byte constant, thus PUSH32 will
+        // be emitted. This will increase code size.
+        if (!Level.getSizeLevel() && Level.getSpeedupLevel() > 1)
           PM.addPass(EVMSHA3ConstFoldingPass());
       });
 
@@ -170,7 +174,7 @@ void EVMTargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
   PB.registerOptimizerLastEPCallback([](ModulePassManager &PM,
                                         OptimizationLevel Level,
                                         ThinOrFullLTOPhase Phase) {
-    if (Level != OptimizationLevel::O0)
+    if (Level.getSpeedupLevel() > 1)
       // Earlier transformations may expose new opportunities for DSE,
       // so we run it again.
       PM.addPass(createModuleToFunctionPassAdaptor(DSEPass()));
@@ -246,7 +250,7 @@ public:
 
 void EVMPassConfig::addIRPasses() {
   addPass(createEVMLowerIntrinsicsPass());
-  if (TM->getOptLevel() != CodeGenOptLevel::None) {
+  if (TM->getOptLevel() > CodeGenOptLevel::Less) {
     addPass(createEarlyCSEPass(true));
     addPass(createGVNPass());
     // Tests show that running the DSE pass at the end of the optimization
@@ -256,9 +260,12 @@ void EVMPassConfig::addIRPasses() {
                                             .hoistCommonInsts(true)
                                             .sinkCommonInsts(true)));
     addPass(createLICMPass());
+  }
+  if (TM->getOptLevel() != CodeGenOptLevel::None) {
     addPass(createEVMAAWrapperPass());
     addPass(createEVMExternalAAWrapperPass());
   }
+
   TargetPassConfig::addIRPasses();
 }
 
@@ -325,7 +332,7 @@ void EVMPassConfig::addPreEmitPass() {
     // Optimize branch instructions after stackification. This is done again
     // here, since EVMSplitCriticalEdges may introduce new BBs that could
     // contain only branches after stackification.
-    if (getOptLevel() != CodeGenOptLevel::None) {
+    if (getOptLevel() > CodeGenOptLevel::Less) {
       addPass(&BranchFolderPassID);
       addPass(&TailDuplicateLegacyID);
     }
