@@ -856,7 +856,7 @@ def LLVM_IntrCallOp : LLVM_Op<"intrcall"> {
   string llvmBuilder = [{
     llvm::Module *mod = builder.GetInsertBlock()->getModule();
     llvm::LLVMContext &ctx = mod->getContext();
-    llvm::Function *fn = llvm::Intrinsic::getDeclaration(mod, $id);
+    llvm::Function *fn = llvm::Intrinsic::getOrInsertDeclaration(mod, $id);
 
     auto operands = moduleTranslation.lookupValues(opInst.getOperands());
     if (op.getMetadata()) {
