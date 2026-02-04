@@ -11,3 +11,5 @@ add_mlir_dialect_library(MLIRSolDialect
 
   LINK_LIBS PUBLIC
   )
+
+add_subdirectory(Transforms)
