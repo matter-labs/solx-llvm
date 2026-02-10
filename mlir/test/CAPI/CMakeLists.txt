@@ -133,3 +133,20 @@ _add_capi_test_executable(mlir-capi-smt-test
     MLIRCAPISMT
     MLIRCAPIExportSMTLIB
 )
+
+# EVM local begin
+_add_capi_test_executable(mlir-capi-sol-test
+  sol.c
+  LINK_LIBS PRIVATE
+    MLIRCAPIConversion
+    MLIRCAPIIR
+    MLIRCAPISol
+)
+
+_add_capi_test_executable(mlir-capi-yul-test
+  yul.c
+  LINK_LIBS PRIVATE
+    MLIRCAPIIR
+    MLIRCAPIYul
+)
+# EVM local end

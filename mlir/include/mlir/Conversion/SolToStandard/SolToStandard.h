@@ -22,12 +22,9 @@ class Pass;
 class TypeConverter;
 class RewritePatternSet;
 
-namespace sol {
+#define GEN_PASS_DECL_CONVERTSOLTOSTANDARDPASS
+#include "mlir/Conversion/Passes.h.inc"
 
-/// Creates a pass to lower sol dialect to standard dialects.
-std::unique_ptr<Pass> createConvertSolToStandardPass();
-
-} // namespace sol
 } // namespace mlir
 
 #endif // MLIR_CONVERSION_SOLTOSTANDARD_SOLTOSTANDARD_H

@@ -1,4 +1,4 @@
-//===- LoopInvariantCodeMotion.cpp - LICM for Sol dialect -----------------===//
+//===- SolLoopInvariantCodeMotion.cpp - LICM for Sol dialect --------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -22,11 +22,22 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 
+namespace mlir {
+namespace sol {
+#define GEN_PASS_DEF_LOOPINVARIANTCODEMOTIONPASS
+#include "mlir/Dialect/Sol/Transforms/Passes.h.inc"
+} // namespace sol
+} // namespace mlir
+
 using namespace mlir;
 
-struct LoopInvariantCodeMotion
-    : public PassWrapper<LoopInvariantCodeMotion, OperationPass<>> {
-  StringRef getArgument() const override { return "sol-licm"; }
+struct LoopInvariantCodeMotionPass
+    : public sol::impl::LoopInvariantCodeMotionPassBase<
+          LoopInvariantCodeMotionPass> {
+  LoopInvariantCodeMotionPass() = default;
+  LoopInvariantCodeMotionPass(const LoopInvariantCodeMotionPass &other)
+      : LoopInvariantCodeMotionPassBase(other) {}
+
   Statistic count{this, "count", "Number of ops licm'd"};
 
   void runOnOperation() override {
@@ -115,12 +126,4 @@ struct LoopInvariantCodeMotion
         /*moveOutOfRegion=*/
         [&](Operation *op, Region *) { loopLike.moveOutOfLoop(op); });
   }
-
-  LoopInvariantCodeMotion() = default;
-  LoopInvariantCodeMotion(const LoopInvariantCodeMotion &other)
-      : PassWrapper(other) {}
 };
-
-std::unique_ptr<Pass> sol::createLoopInvariantCodeMotionPass() {
-  return std::make_unique<LoopInvariantCodeMotion>();
-}

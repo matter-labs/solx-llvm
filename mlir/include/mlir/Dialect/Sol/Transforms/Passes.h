@@ -14,16 +14,15 @@
 #define MLIR_DIALECT_SOL_TRANSFORMS_PASSES_H
 
 #include "mlir/Pass/Pass.h"
-#include <memory>
 
 namespace mlir {
 namespace sol {
 
-/// Creates a pass that lowers modifier-related ops.
-std::unique_ptr<Pass> createModifierOpLoweringPass();
+#define GEN_PASS_DECL
+#include "mlir/Dialect/Sol/Transforms/Passes.h.inc"
 
-/// Creates a pass for loop invariant code motion.
-std::unique_ptr<Pass> createLoopInvariantCodeMotionPass();
+#define GEN_PASS_REGISTRATION
+#include "mlir/Dialect/Sol/Transforms/Passes.h.inc"
 
 } // namespace sol
 } // namespace mlir

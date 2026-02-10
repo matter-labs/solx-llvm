@@ -22,6 +22,11 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/CommandLine.h"
 
+namespace mlir {
+#define GEN_PASS_DEF_CONVERTSOLTOSTANDARDPASS
+#include "mlir/Conversion/Passes.h.inc"
+} // namespace mlir
+
 using namespace mlir;
 
 namespace {
@@ -56,23 +61,8 @@ struct ConvCastOpLowering : public OpConversionPattern<sol::ConvCastOp> {
 };
 
 /// Pass for lowering the sol dialect to the standard dialects.
-/// TODO:
-/// - Generate this using mlir-tblgen.
-struct ConvertSolToStandard
-    : public PassWrapper<ConvertSolToStandard, OperationPass<ModuleOp>> {
-
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertSolToStandard)
-
-  ConvertSolToStandard() = default;
-
-  ConvertSolToStandard(ConvertSolToStandard const &other)
-      : PassWrapper(other) {}
-
-  void getDependentDialects(DialectRegistry &reg) const override {
-    reg.insert<yul::YulDialect, func::FuncDialect, scf::SCFDialect,
-               cf::ControlFlowDialect, arith::ArithDialect,
-               LLVM::LLVMDialect>();
-  }
+struct ConvertSolToStandardPass
+    : public impl::ConvertSolToStandardPassBase<ConvertSolToStandardPass> {
 
   // TODO: Generalize this comment.
   //
@@ -260,12 +250,6 @@ struct ConvertSolToStandard
       return;
     }
   }
-
-  StringRef getArgument() const override { return "convert-sol-to-std"; }
 };
 
 } // namespace
-
-std::unique_ptr<Pass> sol::createConvertSolToStandardPass() {
-  return std::make_unique<ConvertSolToStandard>();
-}

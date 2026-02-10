@@ -65,6 +65,9 @@
 #include "mlir/Conversion/SCFToSPIRV/SCFToSPIRVPass.h"
 #include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVMPass.h"
 #include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"
+// EVM local begin
+#include "mlir/Conversion/SolToStandard/SolToStandard.h"
+// EVM local end
 #include "mlir/Conversion/TensorToLinalg/TensorToLinalgPass.h"
 #include "mlir/Conversion/TensorToSPIRV/TensorToSPIRVPass.h"
 #include "mlir/Conversion/TosaToArith/TosaToArith.h"

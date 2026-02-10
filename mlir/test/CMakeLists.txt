@@ -120,6 +120,10 @@ set(MLIR_TEST_DEPENDS
   mlir-translate
   tblgen-lsp-server
   tblgen-to-irdl
+# EVM local begin
+  mlir-capi-sol-test
+  mlir-capi-yul-test
+# EVM local end
   )
 if(NOT MLIR_STANDALONE_BUILD)
   list(APPEND MLIR_TEST_DEPENDS FileCheck count not split-file)

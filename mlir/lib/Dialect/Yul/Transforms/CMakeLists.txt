@@ -1,8 +1,11 @@
 add_mlir_dialect_library(MLIRYulTransforms
-  FuseFreePtr.cpp
+  YulFuseFreePtr.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Yul/Transforms
+
+  DEPENDS
+  MLIRYulPassIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect

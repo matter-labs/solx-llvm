@@ -21,6 +21,12 @@ mlir_tablegen(SolCanonicalization.inc -gen-rewriters)
 # Create MLIRSolExtraIncGen.
 add_public_tablegen_target(MLIRSolExtraIncGen)
 
+set(LLVM_TARGET_DEFINITIONS Transforms/Passes.td)
+mlir_tablegen(Transforms/Passes.h.inc -gen-pass-decls -name Sol)
+mlir_tablegen(Transforms/Passes.capi.h.inc -gen-pass-capi-header --prefix Sol)
+mlir_tablegen(Transforms/Passes.capi.cpp.inc -gen-pass-capi-impl --prefix Sol)
+add_public_tablegen_target(MLIRSolPassIncGen)
+
 # Generate the docs
 add_mlir_doc(SolDialect SolDialect Sol/ -gen-dialect-doc)
 add_mlir_doc(SolOps SolOps Sol/ -gen-op-doc)
