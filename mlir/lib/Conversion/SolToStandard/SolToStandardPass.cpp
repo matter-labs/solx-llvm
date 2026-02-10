@@ -65,8 +65,6 @@ struct ConvertSolToStandard
 
   ConvertSolToStandard() = default;
 
-  ConvertSolToStandard(mlir::sol::Target tgt) : tgt(tgt) {}
-
   ConvertSolToStandard(ConvertSolToStandard const &other)
       : PassWrapper(other) {}
 
@@ -184,13 +182,7 @@ struct ConvertSolToStandard
              GenericTypeConversion<sol::ICallOp>,
              GenericTypeConversion<sol::ReturnOp>>(tyConv, &getContext());
 
-    switch (tgt) {
-    case mlir::sol::Target::EVM:
-      evm::populateStage1Pats(pats, tyConv);
-      break;
-    default:
-      llvm_unreachable("Invalid target");
-    };
+    evm::populateStage1Pats(pats, tyConv);
 
     // Assign slots to state variables.
     mod.walk([&](sol::ContractOp contr) {
@@ -227,14 +219,7 @@ struct ConvertSolToStandard
         .addLegalOp<sol::FuncOp, sol::CallOp, sol::ReturnOp, sol::ConvCastOp>();
 
     RewritePatternSet pats(&getContext());
-
-    switch (tgt) {
-    case mlir::sol::Target::EVM:
-      evm::populateStage2Pats(pats);
-      break;
-    default:
-      llvm_unreachable("Invalid target");
-    };
+    evm::populateStage2Pats(pats);
 
     if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
       return failure();
@@ -252,13 +237,7 @@ struct ConvertSolToStandard
     convTgt.addIllegalDialect<sol::SolDialect>();
 
     RewritePatternSet pats(&getContext());
-    switch (tgt) {
-    case mlir::sol::Target::EVM:
-      evm::populateFuncPats(pats, tyConv);
-      break;
-    default:
-      llvm_unreachable("Invalid target");
-    };
+    evm::populateFuncPats(pats, tyConv);
 
     if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
       return failure();
@@ -266,13 +245,6 @@ struct ConvertSolToStandard
   }
 
   void runOnOperation() override {
-    // We can't check this in the ctor since cl::ParseCommandLineOptions won't
-    // be called then.
-    if (clTgt.getNumOccurrences() > 0) {
-      assert(tgt == mlir::sol::Target::Undefined);
-      tgt = clTgt;
-    }
-
     ModuleOp mod = getOperation();
     evm::SolTypeConverter tyConv;
     if (failed(runStage1Conversion(mod, tyConv))) {
@@ -290,23 +262,10 @@ struct ConvertSolToStandard
   }
 
   StringRef getArgument() const override { return "convert-sol-to-std"; }
-
-protected:
-  mlir::sol::Target tgt = mlir::sol::Target::Undefined;
-  Pass::Option<mlir::sol::Target> clTgt{
-      *this, "target", llvm::cl::desc("Target for the sol lowering"),
-      llvm::cl::init(mlir::sol::Target::Undefined),
-      llvm::cl::values(
-          clEnumValN(mlir::sol::Target::EVM, "evm", "EVM target"))};
 };
 
 } // namespace
 
 std::unique_ptr<Pass> sol::createConvertSolToStandardPass() {
   return std::make_unique<ConvertSolToStandard>();
-}
-
-std::unique_ptr<Pass>
-sol::createConvertSolToStandardPass(mlir::sol::Target tgt) {
-  return std::make_unique<ConvertSolToStandard>(tgt);
 }

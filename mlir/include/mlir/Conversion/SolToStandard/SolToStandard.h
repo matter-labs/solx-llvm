@@ -13,7 +13,6 @@
 #ifndef MLIR_CONVERSION_SOLTOSTANDARD_SOLTOSTANDARD_H
 #define MLIR_CONVERSION_SOLTOSTANDARD_SOLTOSTANDARD_H
 
-#include "mlir/Dialect/Sol/Target.h"
 #include "mlir/Pass/Pass.h"
 #include <memory>
 
@@ -27,7 +26,6 @@ namespace sol {
 
 /// Creates a pass to lower sol dialect to standard dialects.
 std::unique_ptr<Pass> createConvertSolToStandardPass();
-std::unique_ptr<Pass> createConvertSolToStandardPass(Target tgt);
 
 } // namespace sol
 } // namespace mlir
