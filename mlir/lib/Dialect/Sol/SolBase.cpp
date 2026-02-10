@@ -12,7 +12,6 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Sol/Sol.h"
-#include "mlir/Dialect/Sol/Target.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -361,16 +360,6 @@ Type PointerType::parse(AsmParser &parser) {
 void PointerType::print(AsmPrinter &printer) const {
   printer << "<" << getPointeeType() << ", "
           << stringifyDataLocation(getDataLocation()) << ">";
-}
-
-//===----------------------------------------------------------------------===//
-// Target
-//===----------------------------------------------------------------------===//
-
-Target mlir::sol::strToTarget(llvm::StringRef str) {
-  if (str.equals_insensitive("evm"))
-    return Target::EVM;
-  return Target::Undefined;
 }
 
 #define GET_ATTRDEF_CLASSES
