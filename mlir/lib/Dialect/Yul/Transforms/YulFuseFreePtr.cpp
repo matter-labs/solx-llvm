@@ -1,4 +1,4 @@
-//===- FuseFreePtr.cpp - Fuse free pointer operations ---------------------===//
+//===- YulFuseFreePtr.cpp - Fuse free pointer operations ------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -24,10 +24,20 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/STLExtras.h"
 
+namespace mlir {
+namespace yul {
+#define GEN_PASS_DEF_FUSEFREEPTRPASS
+#include "mlir/Dialect/Yul/Transforms/Passes.h.inc"
+} // namespace yul
+} // namespace mlir
+
 using namespace mlir;
 
-struct FuseFreePtr : public PassWrapper<FuseFreePtr, OperationPass<>> {
-  StringRef getArgument() const override { return "sol-fuse-free-ptr"; }
+struct FuseFreePtrPass
+    : public yul::impl::FuseFreePtrPassBase<FuseFreePtrPass> {
+  FuseFreePtrPass() = default;
+  FuseFreePtrPass(const FuseFreePtrPass &other) : FuseFreePtrPassBase(other) {}
+
   Statistic count{this, "count", "Number free-ptr updates fused"};
 
   void runOnOperation() override {
@@ -110,11 +120,4 @@ struct FuseFreePtr : public PassWrapper<FuseFreePtr, OperationPass<>> {
     for (yul::UpdFreePtrOp updOp : updOps)
       r.eraseOp(updOp);
   }
-
-  FuseFreePtr() = default;
-  FuseFreePtr(const FuseFreePtr &other) : PassWrapper(other) {}
 };
-
-std::unique_ptr<Pass> yul::createFuseFreePtrPass() {
-  return std::make_unique<FuseFreePtr>();
-}

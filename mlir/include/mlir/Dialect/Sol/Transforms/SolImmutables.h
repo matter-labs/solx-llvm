@@ -1,4 +1,4 @@
-//===- Immutables.h - Solidity immutable lowering ---------------*- C++ -*-===//
+//===- SolImmutables.h - Solidity immutable lowering ------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,8 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MLIR_DIALECT_SOL_TRANSFORMS_IMMUTABLES_H
-#define MLIR_DIALECT_SOL_TRANSFORMS_IMMUTABLES_H
+#ifndef MLIR_DIALECT_SOL_TRANSFORMS_SOLIMMUTABLES_H
+#define MLIR_DIALECT_SOL_TRANSFORMS_SOLIMMUTABLES_H
 
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/SmallVector.h"
@@ -31,4 +31,4 @@ void removeSetImmutables(ModuleOp mod);
 } // namespace evm
 } // namespace mlir
 
-#endif // MLIR_DIALECT_SOL_TRANSFORMS_IMMUTABLES_H
+#endif // MLIR_DIALECT_SOL_TRANSFORMS_SOLIMMUTABLES_H

@@ -77,6 +77,9 @@
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Shape/Transforms/BufferizableOpInterfaceImpl.h"
+// EVM local begin
+#include "mlir/Dialect/Sol/Sol.h"
+// EVM local end
 #include "mlir/Dialect/SparseTensor/IR/SparseTensor.h"
 #include "mlir/Dialect/SparseTensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -98,6 +101,9 @@
 #include "mlir/Dialect/Vector/Transforms/SubsetOpInterfaceImpl.h"
 #include "mlir/Dialect/X86Vector/X86VectorDialect.h"
 #include "mlir/Dialect/XeGPU/IR/XeGPU.h"
+// EVM local begin
+#include "mlir/Dialect/Yul/Yul.h"
+// EVM local end
 #include "mlir/IR/Dialect.h"
 #include "mlir/Interfaces/CastInterfaces.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
@@ -154,7 +160,12 @@ inline void registerAllDialects(DialectRegistry &registry) {
                   vector::VectorDialect,
                   x86vector::X86VectorDialect,
                   xegpu::XeGPUDialect,
-                  xevm::XeVMDialect>();
+                  xevm::XeVMDialect,
+                  // EVM local begin
+                  sol::SolDialect,
+                  yul::YulDialect
+                  // EVM local end
+                  >();
   // clang-format on
 
   // Register all external models.

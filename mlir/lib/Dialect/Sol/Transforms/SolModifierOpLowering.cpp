@@ -1,4 +1,4 @@
-//===- ModifierOpLowering.cpp - Lower modifier ops ------------------------===//
+//===- SolModifierOpLowering.cpp - Lower modifier ops ---------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -27,14 +27,20 @@
 #include "llvm/Support/raw_ostream.h"
 #include <utility>
 
+namespace mlir {
+namespace sol {
+#define GEN_PASS_DEF_MODIFIEROPLOWERINGPASS
+#include "mlir/Dialect/Sol/Transforms/Passes.h.inc"
+} // namespace sol
+} // namespace mlir
+
 using namespace mlir;
 
 static constexpr const char *kBeforePlaceholderAttr =
     "sol.modifier.beforePlaceholder";
 
-struct ModifierOpLowering
-    : public PassWrapper<ModifierOpLowering, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ModifierOpLowering)
+struct ModifierOpLoweringPass
+    : public sol::impl::ModifierOpLoweringPassBase<ModifierOpLoweringPass> {
 
   // TODO: Move this to general utils.
   StringAttr getNearestUnusedSymFrom(Operation *op, StringAttr sym) {
@@ -283,10 +289,4 @@ struct ModifierOpLowering
     getOperation().walk([&](sol::FuncOp fn) { lowerModifierCalls(fn); });
     getOperation().walk([&](sol::ModifierOp modifier) { modifier.erase(); });
   }
-
-  StringRef getArgument() const override { return "lower-modifier"; }
 };
-
-std::unique_ptr<Pass> sol::createModifierOpLoweringPass() {
-  return std::make_unique<ModifierOpLowering>();
-}

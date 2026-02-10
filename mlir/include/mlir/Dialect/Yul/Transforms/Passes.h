@@ -14,13 +14,15 @@
 #define MLIR_DIALECT_YUL_TRANSFORMS_PASSES_H
 
 #include "mlir/Pass/Pass.h"
-#include <memory>
 
 namespace mlir {
 namespace yul {
 
-/// Creates a pass that fuses free pointer operations.
-std::unique_ptr<Pass> createFuseFreePtrPass();
+#define GEN_PASS_DECL
+#include "mlir/Dialect/Yul/Transforms/Passes.h.inc"
+
+#define GEN_PASS_REGISTRATION
+#include "mlir/Dialect/Yul/Transforms/Passes.h.inc"
 
 } // namespace yul
 } // namespace mlir

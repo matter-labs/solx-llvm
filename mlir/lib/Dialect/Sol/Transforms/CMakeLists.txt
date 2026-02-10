@@ -1,10 +1,13 @@
 add_mlir_dialect_library(MLIRSolTransforms
-  Immutables.cpp
-  LoopInvariantCodeMotion.cpp
-  ModifierOpLowering.cpp
+  SolImmutables.cpp
+  SolLoopInvariantCodeMotion.cpp
+  SolModifierOpLowering.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Sol/Transforms
+
+  DEPENDS
+  MLIRSolPassIncGen
 
   LINK_LIBS PUBLIC
   MLIRSolToStandard

@@ -9,6 +9,9 @@ add_mlir_conversion_library(MLIRSolToStandard
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Conversion/SolToStandard
 
+  DEPENDS
+  MLIRConversionPassIncGen
+
   LINK_LIBS PUBLIC
   MLIRSolDialect
   MLIRYulDialect

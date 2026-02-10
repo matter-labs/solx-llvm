@@ -1,4 +1,4 @@
-//===- Immutables.cpp - Lower Solidity immutables -------------------------===//
+//===- SolImmutables.cpp - Lower Solidity immutables ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/Sol/Transforms/Immutables.h"
+#include "mlir/Dialect/Sol/Transforms/SolImmutables.h"
 #include "mlir/Conversion/SolToStandard/EVMUtil.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinAttributes.h"

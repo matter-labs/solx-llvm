@@ -1504,4 +1504,22 @@ def ConvertXeVMToLLVMPass : Pass<"convert-xevm-to-llvm"> {
   let dependentDialects = ["LLVM::LLVMDialect"];
 }
 
+// EVM local begin
+//===----------------------------------------------------------------------===//
+// SolToStandard
+//===----------------------------------------------------------------------===//
+
+def ConvertSolToStandardPass : Pass<"convert-sol-to-std", "ModuleOp"> {
+  let summary = "Convert Sol dialect to standard dialects";
+  let dependentDialects = [
+    "yul::YulDialect",
+    "func::FuncDialect",
+    "scf::SCFDialect",
+    "cf::ControlFlowDialect",
+    "arith::ArithDialect",
+    "LLVM::LLVMDialect",
+  ];
+}
+// EVM local end
+
 #endif // MLIR_CONVERSION_PASSES
