@@ -1149,8 +1149,14 @@ struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
     // FIXME: Is there a better way to check this?
     if (objName.ends_with("_deployed")) {
       auto runtimeMod = r.create<ModuleOp>(loc, objName);
-      moveObjToMod(obj, runtimeMod, r);
+      auto parentMod = obj->getParentOfType<ModuleOp>();
+      assert(parentMod && "object should be nested in a module");
 
+      // Copy module-level attributes (e.g. llvm.data_layout,
+      // llvm.target_triple, sol.evm_version) from the parent module.
+      for (NamedAttribute attr : parentMod->getDialectAttrs())
+        runtimeMod->setAttr(attr.getName(), attr.getValue());
+      moveObjToMod(obj, runtimeMod, r);
     } else {
       auto creationMod = obj->getParentOfType<ModuleOp>();
       assert(creationMod);
