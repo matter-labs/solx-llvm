@@ -149,6 +149,7 @@ struct ConvertSolToStandardPass
         sol::RevertOp,
         sol::EmitOp,
         sol::RequireOp,
+        sol::AssertOp,
         sol::ConvCastOp,
         sol::IfOp,
         sol::SwitchOp,

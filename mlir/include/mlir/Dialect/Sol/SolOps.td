@@ -398,9 +398,16 @@ def Sol_EmitOp : Sol_Op<"emit"> {
 }
 
 def Sol_RevertOp : Sol_Op<"revert"> {
-  let arguments = (ins Variadic<AnyType>:$args, StrAttr:$signature);
+  // $signature represents the error call's signature if $call is set.
+  let arguments = (ins Variadic<AnyType>:$args, StrAttr:$signature,
+                       UnitAttr:$call);
 
   let assemblyFormat = "$signature ($args^ `:` type($args))? attr-dict";
+}
+
+def Sol_AssertOp : Sol_Op<"assert"> {
+  let arguments = (ins I1:$cond);
+  let assemblyFormat = "$cond attr-dict";
 }
 
 def Sol_RequireOp : Sol_Op<"require"> {

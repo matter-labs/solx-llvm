@@ -2252,6 +2252,26 @@ struct TryOpLowering : public OpConversionPattern<sol::TryOp> {
   }
 };
 
+struct AssertOpLowering : public OpConversionPattern<sol::AssertOp> {
+  using OpConversionPattern<sol::AssertOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::AssertOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    evm::Builder evmB(r, loc);
+
+    // Generate: if (!cond) { panic(0x01) }
+    mlir::Value falseVal =
+        r.create<arith::ConstantIntOp>(loc, r.getI1Type(), 0);
+    mlir::Value negCond = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                  op.getCond(), falseVal);
+    evmB.genPanic(evm::PanicCode::Assert, negCond);
+
+    r.eraseOp(op);
+    return success();
+  }
+};
+
 struct RequireOpLowering : public OpConversionPattern<sol::RequireOp> {
   using OpConversionPattern<sol::RequireOp>::OpConversionPattern;
 
@@ -2333,8 +2353,20 @@ struct RevertOpLowering : public OpConversionPattern<sol::RevertOp> {
   LogicalResult matchAndRewrite(sol::RevertOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     evm::Builder evmB(r, op.getLoc());
-    evmB.genRevert(op.getArgs().getTypes(), adaptor.getArgs(),
-                   op.getSignature());
+    if (op.getCall()) {
+      // revert ErrorName(...)
+      assert(!op.getSignature().empty());
+      evmB.genRevert(op.getArgs().getTypes(), adaptor.getArgs(),
+                     op.getSignature());
+    } else if (!op.getSignature().empty()) {
+      // revert("reason")
+      evmB.genRevertWithMsg(op.getSignature().str());
+    } else {
+      // revert()
+      mlir::solgen::BuilderExt bExt(r, op.getLoc());
+      mlir::Value zero = bExt.genI256Const(0);
+      r.create<yul::RevertOp>(op.getLoc(), zero, zero);
+    }
     r.eraseOp(op);
     return success();
   }
@@ -3050,7 +3082,7 @@ void evm::populateEmitPat(RewritePatternSet &pats, TypeConverter &tyConv) {
 }
 
 void evm::populateRequirePat(RewritePatternSet &pats) {
-  pats.add<RequireOpLowering>(pats.getContext());
+  pats.add<RequireOpLowering, AssertOpLowering>(pats.getContext());
 }
 
 void evm::populateContractPat(RewritePatternSet &pats) {
