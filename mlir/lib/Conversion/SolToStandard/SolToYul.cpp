@@ -1182,7 +1182,15 @@ struct GetCallDataOpLowering : public OpConversionPattern<sol::GetCallDataOp> {
   LogicalResult matchAndRewrite(sol::GetCallDataOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     mlir::solgen::BuilderExt bExt(r, op.getLoc());
-    r.replaceOp(op, bExt.genI256Const(0));
+    Value zero = bExt.genI256Const(0);
+    if (auto strTy = dyn_cast<sol::StringType>(op.getType())) {
+      if (strTy.getDataLocation() == sol::DataLocation::CallData) {
+        Value callDataSz = r.create<yul::CallDataSizeOp>(op.getLoc());
+        r.replaceOp(op, bExt.genLLVMStruct({zero, callDataSz}));
+        return success();
+      }
+    }
+    r.replaceOp(op, zero);
     return success();
   }
 };
