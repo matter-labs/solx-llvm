@@ -750,6 +750,153 @@ Value evm::Builder::genABITupleEncoding(std::string const &str, Value headStart,
   return b.create<arith::AddIOp>(loc, tailAddr, stringSize);
 }
 
+Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
+                                         std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  // Integer type.
+  if (auto intTy = dyn_cast<IntegerType>(ty)) {
+    unsigned bitWidth = intTy.getWidth();
+    bool isBool = (bitWidth == 1);
+    assert((isBool || bitWidth % 8 == 0) &&
+           "Expected bool or byte-aligned integers");
+
+    // bool is stored as uint8 in packed encoding.
+    unsigned byteSize = isBool ? 1 : bitWidth / 8;
+    Value casted = bExt.genIntCast(/*width=*/256, intTy.isSigned(), val, loc);
+    if (byteSize < 32) {
+      unsigned shiftBits = 256 - byteSize * 8;
+      Value shifted =
+          b.create<arith::ShLIOp>(loc, casted, bExt.genI256Const(shiftBits));
+      b.create<yul::MStoreOp>(loc, addr, shifted);
+    } else {
+      b.create<yul::MStoreOp>(loc, addr, casted);
+    }
+    return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(byteSize));
+  }
+
+  // Enum type.
+  if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
+    assert(enumTy.getMax() <= 255 &&
+           "Expected enums with at most 256 elements");
+    Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
+    Value shifted =
+        b.create<arith::ShLIOp>(loc, casted, bExt.genI256Const(248));
+    b.create<yul::MStoreOp>(loc, addr, shifted);
+    return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(1));
+  }
+
+  // Bytes type.
+  if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+    b.create<yul::MStoreOp>(loc, addr, val);
+    return b.create<arith::AddIOp>(loc, addr,
+                                   bExt.genI256Const(bytesTy.getSize()));
+  }
+
+  // String type.
+  if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
+    Value dataLen = genDynSize(val, stringTy, loc);
+    Value dataAddr = genDataAddrPtr(val, stringTy, loc);
+    if (stringTy.getDataLocation() == sol::DataLocation::Memory)
+      b.create<yul::MCopyOp>(loc, addr, dataAddr, dataLen);
+    else if (stringTy.getDataLocation() == sol::DataLocation::CallData)
+      b.create<yul::CallDataCopyOp>(loc, addr, dataAddr, dataLen);
+    else
+      llvm_unreachable("NYI");
+    return b.create<arith::AddIOp>(loc, addr, dataLen);
+  }
+
+  // Array type.
+  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
+    if (arrTy.getDataLocation() == sol::DataLocation::Storage)
+      llvm_unreachable("NYI");
+
+    Value size;
+    Value srcArrAddr;
+    if (arrTy.isDynSized()) {
+      Value dynSize = genDynSize(val, arrTy, loc);
+      size = bExt.genCastToIdx(dynSize);
+      srcArrAddr = genDataAddrPtr(val, arrTy, loc);
+    } else {
+      size = bExt.genIdxConst(arrTy.getSize());
+      srcArrAddr = val;
+    }
+
+    auto forOp = b.create<scf::ForOp>(
+        loc, /*lowerBound=*/bExt.genIdxConst(0),
+        /*upperBound=*/size,
+        /*step=*/bExt.genIdxConst(1),
+        /*initArgs=*/ValueRange{addr, srcArrAddr},
+        /*builder=*/
+        [&](OpBuilder &b, Location loc, Value indVar, ValueRange initArgs) {
+          Value iDstAddr = initArgs[0];
+          Value iSrcAddr = initArgs[1];
+          Type eltTy = arrTy.getEltType();
+          sol::DataLocation dataLoc = arrTy.getDataLocation();
+
+          // Normalize a src element value to i256 for packed encoding,
+          // performing range checks if needed.
+          auto normalizeElt = [&](Value srcVal) -> Value {
+            if (auto intTy = dyn_cast<IntegerType>(eltTy)) {
+              if (intTy.getWidth() == 256)
+                return srcVal;
+
+              assert(intTy.getWidth() < 256 &&
+                     "Expected integer types smaller than 256 bits");
+
+              // Truncate then re-extend to produce the i256 normalized form,
+              // and validate the range for calldata elements.
+              Value trunc = bExt.genIntCast(intTy.getWidth(), intTy.isSigned(),
+                                            srcVal, loc);
+              Value ext =
+                  bExt.genIntCast(/*width=*/256, intTy.isSigned(), trunc, loc);
+              if (dataLoc == sol::DataLocation::CallData) {
+                auto revertCond = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::ne, srcVal, ext);
+                genRevert(revertCond, loc);
+              }
+              return ext;
+            }
+            if (auto enumTy = dyn_cast<sol::EnumType>(eltTy)) {
+              auto cond = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::ugt, srcVal,
+                  bExt.genI256Const(enumTy.getMax()));
+              if (dataLoc == sol::DataLocation::CallData)
+                genRevert(cond, loc);
+              else
+                genPanic(mlir::evm::PanicCode::EnumConversionError, cond, loc);
+              return bExt.genIntCast(/*width=*/256, /*isSigned=*/false, srcVal,
+                                     loc);
+            }
+            if (isa<sol::BytesType>(eltTy))
+              llvm_unreachable("NYI: packed encoding of bytes arrays");
+            llvm_unreachable("Unexpected type in packed array");
+          };
+
+          Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
+          b.create<yul::MStoreOp>(loc, iDstAddr, normalizeElt(srcVal));
+          Value stride = bExt.genI256Const(getCallDataHeadSize(eltTy));
+          Value nextDstAddr = b.create<arith::AddIOp>(loc, iDstAddr, stride);
+          Value nextSrcAddr = b.create<arith::AddIOp>(loc, iSrcAddr, stride);
+          b.create<scf::YieldOp>(loc, ValueRange{nextDstAddr, nextSrcAddr});
+        });
+    return forOp.getResult(0);
+  }
+
+  llvm_unreachable("NYI: packed encoding of this type");
+}
+
+Value evm::Builder::genABIPackedEncoding(TypeRange tys, ValueRange vals,
+                                         Value addr,
+                                         std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  Value curAddr = addr;
+  for (auto [ty, val] : llvm::zip(tys, vals))
+    curAddr = genABIPackedEncoding(ty, val, curAddr, loc);
+  return curAddr;
+}
+
 Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
                                         Value tupleStart, Value tupleEnd,
                                         std::optional<mlir::Location> locArg) {

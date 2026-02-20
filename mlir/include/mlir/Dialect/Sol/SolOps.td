@@ -347,7 +347,8 @@ def Sol_SliceOp : Sol_Op<"slice"> {
 }
 
 def Sol_EncodeOp : Sol_Op<"encode"> {
-  let arguments = (ins Variadic<AnyType>:$ins);
+  // When $packed is set, values are encoded without per-element padding.
+  let arguments = (ins Variadic<AnyType>:$ins, UnitAttr:$packed);
   // FIXME: AnyType -> Sol_StringType causes the asm printer to miss the prefix!
   let results = (outs AnyType:$res);
   let assemblyFormat = "($ins^ `:` type($ins))? `:` type($res) attr-dict";
