@@ -2083,14 +2083,25 @@ struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
     evm::Builder evmB(r, loc);
 
     Value freePtr = evmB.genFreePtr();
-    Value tupleStart =
-        r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
-    Value tupleEnd = evmB.genABITupleEncoding(
-        op.getOperandTypes(), adaptor.getOperands(), tupleStart);
-    Value tupleSize = r.create<arith::SubIOp>(loc, tupleEnd, tupleStart);
-    r.create<yul::MStoreOp>(loc, freePtr, tupleSize);
-    Value allocationSize = r.create<arith::SubIOp>(loc, tupleEnd, freePtr);
-    evmB.genFreePtrUpd(freePtr, allocationSize);
+    if (op.getPacked()) {
+      Value dataStart =
+          r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
+      Value dataEnd = evmB.genABIPackedEncoding(
+          op.getOperandTypes(), adaptor.getOperands(), dataStart);
+      Value dataSize = r.create<arith::SubIOp>(loc, dataEnd, dataStart);
+      r.create<yul::MStoreOp>(loc, freePtr, dataSize);
+      Value allocationSize = r.create<arith::SubIOp>(loc, dataEnd, freePtr);
+      evmB.genFreePtrUpd(freePtr, allocationSize);
+    } else {
+      Value tupleStart =
+          r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
+      Value tupleEnd = evmB.genABITupleEncoding(
+          op.getOperandTypes(), adaptor.getOperands(), tupleStart);
+      Value tupleSize = r.create<arith::SubIOp>(loc, tupleEnd, tupleStart);
+      r.create<yul::MStoreOp>(loc, freePtr, tupleSize);
+      Value allocationSize = r.create<arith::SubIOp>(loc, tupleEnd, freePtr);
+      evmB.genFreePtrUpd(freePtr, allocationSize);
+    }
     r.replaceOp(op, freePtr);
     return success();
   }

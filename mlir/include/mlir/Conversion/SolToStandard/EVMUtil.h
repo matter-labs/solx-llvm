@@ -221,6 +221,16 @@ public:
                            std::vector<Value> &results, bool fromMem,
                            std::optional<Location> locArg = std::nullopt);
 
+  /// Generates packed (non-padded) encoding for a single value and returns the
+  /// address after the encoded bytes.
+  Value genABIPackedEncoding(Type ty, Value val, Value addr,
+                             std::optional<Location> locArg = std::nullopt);
+
+  /// Generates packed (non-padded) encoding for a tuple of values and returns
+  /// the address after all encoded bytes.
+  Value genABIPackedEncoding(TypeRange tys, ValueRange vals, Value addr,
+                             std::optional<Location> locArg = std::nullopt);
+
   /// Generates the panic code.
   void genPanic(PanicCode code, std::optional<Location> locArg = std::nullopt);
   void genPanic(PanicCode code, Value cond,
