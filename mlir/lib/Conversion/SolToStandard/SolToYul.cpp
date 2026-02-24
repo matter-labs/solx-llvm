@@ -2086,17 +2086,32 @@ struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
     if (op.getPacked()) {
       Value dataStart =
           r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
-      Value dataEnd = evmB.genABIPackedEncoding(
-          op.getOperandTypes(), adaptor.getOperands(), dataStart);
+      Value dataEnd = evmB.genABIPackedEncoding(op.getIns().getType(),
+                                                adaptor.getIns(), dataStart);
       Value dataSize = r.create<arith::SubIOp>(loc, dataEnd, dataStart);
       r.create<yul::MStoreOp>(loc, freePtr, dataSize);
       Value allocationSize = r.create<arith::SubIOp>(loc, dataEnd, freePtr);
       evmB.genFreePtrUpd(freePtr, allocationSize);
+    } else if (op.getSelector()) {
+      assert(adaptor.getSelector() && "selector operand is required");
+
+      Value selectorAddr =
+          r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
+      r.create<yul::MStoreOp>(loc, selectorAddr, adaptor.getSelector());
+
+      Value tupleStart =
+          r.create<arith::AddIOp>(loc, selectorAddr, bExt.genI256Const(4));
+      Value tupleEnd = evmB.genABITupleEncoding(op.getIns().getType(),
+                                                adaptor.getIns(), tupleStart);
+      Value dataSize = r.create<arith::SubIOp>(loc, tupleEnd, selectorAddr);
+      r.create<yul::MStoreOp>(loc, freePtr, dataSize);
+      Value allocationSize = r.create<arith::SubIOp>(loc, tupleEnd, freePtr);
+      evmB.genFreePtrUpd(freePtr, allocationSize);
     } else {
       Value tupleStart =
           r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
-      Value tupleEnd = evmB.genABITupleEncoding(
-          op.getOperandTypes(), adaptor.getOperands(), tupleStart);
+      Value tupleEnd = evmB.genABITupleEncoding(op.getIns().getType(),
+                                                adaptor.getIns(), tupleStart);
       Value tupleSize = r.create<arith::SubIOp>(loc, tupleEnd, tupleStart);
       r.create<yul::MStoreOp>(loc, freePtr, tupleSize);
       Value allocationSize = r.create<arith::SubIOp>(loc, tupleEnd, freePtr);

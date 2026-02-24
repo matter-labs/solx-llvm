@@ -346,12 +346,25 @@ def Sol_SliceOp : Sol_Op<"slice"> {
   }];
 }
 
-def Sol_EncodeOp : Sol_Op<"encode"> {
+def Sol_Bytes4SelectorType : Type<
+  CPred<"::llvm::isa<::mlir::sol::BytesType>($_self) && "
+        "::llvm::cast<::mlir::sol::BytesType>($_self).getSize() == 4">,
+  "!sol.bytes<4>">;
+
+def Sol_EncodeOp : Sol_Op<"encode", [AttrSizedOperandSegments]> {
   // When $packed is set, values are encoded without per-element padding.
-  let arguments = (ins Variadic<AnyType>:$ins, UnitAttr:$packed);
+  // When $selector is set, it is prepended as the first 4 bytes while $ins are
+  // ABI-encoded as a tuple.
+  let arguments = (ins Variadic<AnyType>:$ins,
+                       Optional<Sol_Bytes4SelectorType>:$selector,
+                       UnitAttr:$packed);
   // FIXME: AnyType -> Sol_StringType causes the asm printer to miss the prefix!
   let results = (outs AnyType:$res);
-  let assemblyFormat = "($ins^ `:` type($ins))? `:` type($res) attr-dict";
+  let assemblyFormat = [{
+    (`selector` `(` $selector^ `)`)? ($ins^)?
+    `:` type($selector) type($ins)
+    `:` type($res) attr-dict
+  }];
 }
 
 def Sol_DecodeOp : Sol_Op<"decode"> {
