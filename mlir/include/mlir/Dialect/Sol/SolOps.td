@@ -1028,4 +1028,10 @@ def Sol_ContractOp : Sol_Op<"contract", [Symbol, SymbolTable, SingleBlock,
   let assemblyFormat = "$sym_name $bodyRegion attr-dict";
 }
 
+def Sol_StringLitOp : Sol_Op<"string_lit"> {
+  let arguments = (ins StrAttr:$value);
+  let results = (outs Sol_StringType:$addr);
+  let assemblyFormat = "$value attr-dict `->` qualified(type($addr))";
+}
+
 #endif // MLIR_DIALECT_SOL_SOLOPS_TD

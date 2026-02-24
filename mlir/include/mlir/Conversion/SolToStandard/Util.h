@@ -25,6 +25,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Types.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -177,6 +178,11 @@ public:
   sol::FuncOp getOrInsertFuncOp(StringRef name, FunctionType fnTy,
                                 LLVM::Linkage linkage, ModuleOp mod,
                                 std::vector<NamedAttribute> attrs = {});
+
+  /// Creates a private constant LLVM global in address space 4 (code) holding
+  /// the given string literal bytes, with a unique \c __data_in_code_* name.
+  mlir::LLVM::GlobalOp getStringLiteralGlobalOp(llvm::StringRef literal,
+                                                mlir::ModuleOp mod);
 
   /// Creates a call to a wrapper function of the LLVM::UnreachableOp. This is a
   /// hack to create a non-terminator unreachable op

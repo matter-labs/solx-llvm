@@ -1189,6 +1189,54 @@ struct ArrayLitOpLowering : public OpConversionPattern<sol::ArrayLitOp> {
   }
 };
 
+struct StringLitOpLowering : public OpConversionPattern<sol::StringLitOp> {
+  using OpConversionPattern<sol::StringLitOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::StringLitOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+
+    Location loc = op.getLoc();
+    evm::Builder evmB(r, loc);
+    mlir::solgen::BuilderExt bExt(r, op.getLoc());
+
+    StringRef lit = adaptor.getValue();
+    Value litSize = bExt.genI256Const(lit.size());
+
+    // Beyond a certain length, string literals are cheaper to embed as in-code
+    // data and load via CODECOPY than to construct directly.
+    // TODO: determine the exact size threshold.
+    Value allocPtr = nullptr;
+    if (lit.size() > 128) {
+      // genMemAlloc(Type) calls genMemAllocForDynArray which writes the length
+      // word. Then the CODECOPY below fills only the data area.
+      allocPtr = evmB.genMemAlloc(op.getType(), false, {}, litSize, loc);
+      auto mod = op->getParentOfType<ModuleOp>();
+      // Create a global constant initialized with the given string literal.
+      LLVM::GlobalOp globConst = bExt.getStringLiteralGlobalOp(lit, mod);
+      auto ptrToArray =
+          LLVM::LLVMPointerType::get(mod.getContext(), /*addressSpace=*/4);
+      auto addrOf =
+          r.create<LLVM::AddressOfOp>(loc, ptrToArray, globConst.getSymName());
+      Value intAddr =
+          r.create<LLVM::PtrToIntOp>(loc, r.getIntegerType(256), addrOf);
+      Value strPtr =
+          evmB.genDataAddrPtr(allocPtr, sol::DataLocation::Memory, loc);
+      r.create<yul::CodeCopyOp>(loc, strPtr, intAddr, litSize);
+    } else {
+      // Allocate raw memory (32-byte length slot + rounded-up data) and rely on
+      // genStringStore to write both the length word and the data. This avoids
+      // the redundant length write that genMemAlloc(Type) would produce via
+      // genMemAllocForDynArray.
+      size_t roundedLen = llvm::alignTo(lit.size(), 32u);
+      allocPtr = evmB.genMemAlloc(bExt.genI256Const(32 + roundedLen), loc);
+      evmB.genStringStore(lit.str(), allocPtr, loc);
+    }
+
+    r.replaceOp(op, allocPtr);
+    return success();
+  }
+};
+
 struct GetCallDataOpLowering : public OpConversionPattern<sol::GetCallDataOp> {
   using OpConversionPattern<sol::GetCallDataOp>::OpConversionPattern;
 
@@ -3477,6 +3525,26 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       r.create<yul::RevertOp>(loc, bExt.genI256Const(0), bExt.genI256Const(0));
     }
 
+    // Relocate global constants into their corresponding Creation/Runtime
+    // objects. StringLitOpLowering creates LLVM::GlobalOp at module scope and
+    // LLVM::AddressOfOp inside the yul::ObjectOp. Moving the global into the
+    // ObjectOp lets the EVM backend associate the CODECOPY data with the right
+    // object's data section. ObjectOpLowering (a later pass) then lifts the
+    // global back to module scope for final code generation.
+    ModuleOp mod = runtimeObj->getParentOfType<ModuleOp>();
+    mod->walk([&mod, &r](LLVM::AddressOfOp addrOf) {
+      StringRef name = addrOf.getGlobalName();
+      if (!name.starts_with("__data_in_code_"))
+        return;
+
+      auto obj = addrOf->getParentOfType<yul::ObjectOp>();
+      assert(obj);
+      auto gOp = SymbolTable::lookupNearestSymbolFrom<LLVM::GlobalOp>(
+          mod, r.getStringAttr(name));
+      assert(gOp);
+      gOp->moveBefore(obj.getEntryBlock(), obj.getEntryBlock()->begin());
+    });
+
     // TODO? Make sure op.getBody() is either empty or has only ops marked for
     // deletion.
     r.eraseOp(op);
@@ -3525,8 +3593,8 @@ void evm::populateMemPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            GetCallDataOpLowering, PushOpLowering, PopOpLowering, GepOpLowering,
            MapOpLowering, LoadOpLowering, LoadImmutableOpLowering,
            StoreOpLowering, DataLocCastOpLowering, LengthOpLowering,
-           SliceOpLowering, CopyOpLowering, PushStringOpLowering>(
-      tyConv, pats.getContext());
+           SliceOpLowering, CopyOpLowering, PushStringOpLowering,
+           StringLitOpLowering>(tyConv, pats.getContext());
   pats.add<AddrOfOpLowering>(pats.getContext());
 }
 
