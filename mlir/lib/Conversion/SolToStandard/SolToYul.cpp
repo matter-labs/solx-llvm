@@ -1894,6 +1894,25 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
       }
     }
 
+    // From calldata to memory.
+    if (srcDataLoc == sol::DataLocation::CallData &&
+        dstDataLoc == sol::DataLocation::Memory) {
+      // String/bytes type.
+      if (isa<sol::StringType>(srcTy)) {
+        Value sizeInBytes = evmB.genDynSize(adaptor.getInp(), srcTy);
+        Value memAddr = evmB.genMemAllocForDynArray(
+            sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
+        Value srcDataAddr = evmB.genDataAddrPtr(adaptor.getInp(), srcTy);
+        Value dstDataAddr =
+            r.create<arith::AddIOp>(loc, memAddr, bExt.genI256Const(32));
+
+        r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
+                                      sizeInBytes);
+        r.replaceOp(op, memAddr);
+        return success();
+      }
+    }
+
     llvm_unreachable("NYI");
     return failure();
   }
