@@ -118,6 +118,81 @@ unsigned evm::getStorageByteSize(Type ty) {
   llvm_unreachable("NYI");
 }
 
+Value evm::Builder::normalizeABIScalarForEncoding(
+    Type ty, Value val, Location loc,
+    std::optional<sol::DataLocation> srcDataLoc) {
+  mlir::solgen::BuilderExt bExt(b, loc);
+  bool fromCalldata = srcDataLoc && *srcDataLoc == sol::DataLocation::CallData;
+
+  if (auto intTy = dyn_cast<IntegerType>(ty)) {
+    if (intTy.getWidth() == 256)
+      return val;
+
+    assert(intTy.getWidth() < 256 &&
+           "Expected integer types no wider than 256 bits");
+    auto valTy = cast<IntegerType>(val.getType());
+    assert((valTy.getWidth() == intTy.getWidth() || valTy.getWidth() == 256) &&
+           "Expected integer value with source width or i256 width");
+
+    // If the value is already at source width, only widen to i256 for storing.
+    if (valTy.getWidth() == intTy.getWidth())
+      return bExt.genIntCast(/*width=*/256, intTy.isSigned(), val, loc);
+
+    Value normalized;
+    if (intTy.getWidth() == 1)
+      // Follow what Yul does for bool values 'iszero(iszero(x))' which is
+      // effectively a 'x != 0'.
+      normalized = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, val,
+                                           bExt.genI256Const(0));
+    else
+      // Do the truncation for non-bool integers.
+      normalized =
+          bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), val, loc);
+
+    // Finally, extend to 256 bits.
+    normalized =
+        bExt.genIntCast(/*width=*/256, intTy.isSigned(), normalized, loc);
+    if (fromCalldata) {
+      Value revertCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                 val, normalized);
+      genRevert(revertCond, loc);
+    }
+    return normalized;
+  }
+
+  if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
+    Value normalized =
+        bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
+    Value revertCond =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, normalized,
+                                bExt.genI256Const(enumTy.getMax()));
+    if (fromCalldata)
+      genRevert(revertCond, loc);
+    else
+      genPanic(mlir::evm::PanicCode::EnumConversionError, revertCond, loc);
+    return normalized;
+  }
+
+  if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+    Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
+    if (bytesTy.getSize() == 32)
+      return casted;
+
+    assert(bytesTy.getSize() < 32 && "Expected fixed-bytes width <= 32");
+    APInt mask = APInt::getHighBitsSet(256, bytesTy.getSize() * 8);
+    Value normalized =
+        b.create<arith::AndIOp>(loc, casted, bExt.genI256Const(mask));
+    if (fromCalldata) {
+      Value revertCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                 casted, normalized);
+      genRevert(revertCond, loc);
+    }
+    return normalized;
+  }
+
+  return val;
+}
+
 Value evm::Builder::genHeapPtr(Value addr, std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
 
@@ -567,29 +642,30 @@ void evm::Builder::genABITupleSizeAssert(TypeRange tys, Value tupleSize,
     genRevert(shortTupleCond, loc);
 }
 
-Value evm::Builder::genABITupleEncoding(Type ty, Value src, Value dstAddr,
-                                        bool dstAddrInTail, Value tupleStart,
-                                        Value tailAddr,
-                                        std::optional<Location> locArg) {
+Value evm::Builder::genABITupleEncoding(
+    Type ty, Value src, Value dstAddr, bool dstAddrInTail, Value tupleStart,
+    Value tailAddr, std::optional<Location> locArg,
+    std::optional<sol::DataLocation> srcDataLoc) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
   // Integer type
   if (auto intTy = dyn_cast<IntegerType>(ty)) {
-    src = bExt.genIntCast(/*width=*/256, intTy.isSigned(), src);
+    src = normalizeABIScalarForEncoding(intTy, src, loc, srcDataLoc);
     b.create<yul::MStoreOp>(loc, dstAddr, src);
     return tailAddr;
   }
 
   // Enum type
   if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
-    src = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, src);
+    src = normalizeABIScalarForEncoding(enumTy, src, loc, srcDataLoc);
     b.create<yul::MStoreOp>(loc, dstAddr, src);
     return tailAddr;
   }
 
   // Bytes type
   if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+    src = normalizeABIScalarForEncoding(bytesTy, src, loc, srcDataLoc);
     b.create<yul::MStoreOp>(loc, dstAddr, src);
     return tailAddr;
   }
@@ -657,13 +733,13 @@ Value evm::Builder::genABITupleEncoding(Type ty, Value src, Value dstAddr,
                 loc, iDstAddr,
                 b.create<arith::SubIOp>(loc, iTailAddr, dstArrAddr));
             assert(dstAddrInTail);
-            nextTailAddr =
-                genABITupleEncoding(arrTy.getEltType(), srcVal, iTailAddr,
-                                    dstAddrInTail, tupleStart, iTailAddr, loc);
+            nextTailAddr = genABITupleEncoding(
+                arrTy.getEltType(), srcVal, iTailAddr, dstAddrInTail,
+                tupleStart, iTailAddr, loc, arrTy.getDataLocation());
           } else {
-            nextTailAddr =
-                genABITupleEncoding(arrTy.getEltType(), srcVal, iDstAddr,
-                                    dstAddrInTail, tupleStart, iTailAddr, loc);
+            nextTailAddr = genABITupleEncoding(
+                arrTy.getEltType(), srcVal, iDstAddr, dstAddrInTail, tupleStart,
+                iTailAddr, loc, arrTy.getDataLocation());
           }
 
           Value dstStride =
@@ -764,15 +840,12 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
     // bool is stored as uint8 in packed encoding.
     unsigned byteSize = isBool ? 1 : bitWidth / 8;
-    Value casted = bExt.genIntCast(/*width=*/256, intTy.isSigned(), val, loc);
-    if (byteSize < 32) {
-      unsigned shiftBits = 256 - byteSize * 8;
-      Value shifted =
-          b.create<arith::ShLIOp>(loc, casted, bExt.genI256Const(shiftBits));
-      b.create<yul::MStoreOp>(loc, addr, shifted);
-    } else {
-      b.create<yul::MStoreOp>(loc, addr, casted);
-    }
+    Value normalized = normalizeABIScalarForEncoding(intTy, val, loc);
+    if (byteSize < 32)
+      normalized = b.create<arith::ShLIOp>(
+          loc, normalized, bExt.genI256Const(256 - byteSize * 8));
+
+    b.create<yul::MStoreOp>(loc, addr, normalized);
     return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(byteSize));
   }
 
@@ -780,16 +853,17 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
   if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
     assert(enumTy.getMax() <= 255 &&
            "Expected enums with at most 256 elements");
-    Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
+    Value normalized = normalizeABIScalarForEncoding(enumTy, val, loc);
     Value shifted =
-        b.create<arith::ShLIOp>(loc, casted, bExt.genI256Const(248));
+        b.create<arith::ShLIOp>(loc, normalized, bExt.genI256Const(248));
     b.create<yul::MStoreOp>(loc, addr, shifted);
     return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(1));
   }
 
   // Bytes type.
   if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
-    b.create<yul::MStoreOp>(loc, addr, val);
+    Value normalized = normalizeABIScalarForEncoding(bytesTy, val, loc);
+    b.create<yul::MStoreOp>(loc, addr, normalized);
     return b.create<arith::AddIOp>(loc, addr,
                                    bExt.genI256Const(bytesTy.getSize()));
   }
@@ -835,47 +909,15 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
           Type eltTy = arrTy.getEltType();
           sol::DataLocation dataLoc = arrTy.getDataLocation();
 
-          // Normalize a src element value to i256 for packed encoding,
-          // performing range checks if needed.
-          auto normalizeElt = [&](Value srcVal) -> Value {
-            if (auto intTy = dyn_cast<IntegerType>(eltTy)) {
-              if (intTy.getWidth() == 256)
-                return srcVal;
-
-              assert(intTy.getWidth() < 256 &&
-                     "Expected integer types smaller than 256 bits");
-
-              // Truncate then re-extend to produce the i256 normalized form,
-              // and validate the range for calldata elements.
-              Value trunc = bExt.genIntCast(intTy.getWidth(), intTy.isSigned(),
-                                            srcVal, loc);
-              Value ext =
-                  bExt.genIntCast(/*width=*/256, intTy.isSigned(), trunc, loc);
-              if (dataLoc == sol::DataLocation::CallData) {
-                auto revertCond = b.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::ne, srcVal, ext);
-                genRevert(revertCond, loc);
-              }
-              return ext;
-            }
-            if (auto enumTy = dyn_cast<sol::EnumType>(eltTy)) {
-              auto cond = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::ugt, srcVal,
-                  bExt.genI256Const(enumTy.getMax()));
-              if (dataLoc == sol::DataLocation::CallData)
-                genRevert(cond, loc);
-              else
-                genPanic(mlir::evm::PanicCode::EnumConversionError, cond, loc);
-              return bExt.genIntCast(/*width=*/256, /*isSigned=*/false, srcVal,
-                                     loc);
-            }
-            if (isa<sol::BytesType>(eltTy))
-              llvm_unreachable("NYI: packed encoding of bytes arrays");
-            llvm_unreachable("Unexpected type in packed array");
-          };
-
           Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
-          b.create<yul::MStoreOp>(loc, iDstAddr, normalizeElt(srcVal));
+          if (!isa<IntegerType>(eltTy) && !isa<sol::EnumType>(eltTy) &&
+              !isa<sol::BytesType>(eltTy))
+            llvm_unreachable(
+                "Only integer, enum, and bytes types can be packed");
+
+          srcVal = normalizeABIScalarForEncoding(eltTy, srcVal, loc, dataLoc);
+          b.create<yul::MStoreOp>(loc, iDstAddr, srcVal);
+
           Value stride = bExt.genI256Const(getCallDataHeadSize(eltTy));
           Value nextDstAddr = b.create<arith::AddIOp>(loc, iDstAddr, stride);
           Value nextSrcAddr = b.create<arith::AddIOp>(loc, iSrcAddr, stride);

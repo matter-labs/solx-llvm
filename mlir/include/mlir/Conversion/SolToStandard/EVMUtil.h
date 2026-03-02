@@ -142,6 +142,12 @@ private:
                     int64_t recDepth,
                     std::optional<Location> locArg = std::nullopt);
 
+  /// Returns a normalized scalar value for ABI encoding and emits range checks
+  /// to match Yul cleanup/validator behavior.
+  Value normalizeABIScalarForEncoding(
+      Type ty, Value val, Location loc,
+      std::optional<sol::DataLocation> srcDataLoc = std::nullopt);
+
 public:
   //
   // TODO? Should we work with the high level types + OpAdaptor for the APIs
@@ -200,10 +206,10 @@ public:
 
   /// Generates the tuple encoder code as per the ABI and return the new tail
   /// address.
-  Value genABITupleEncoding(Type ty, Value src, Value dstAddr,
-                            bool dstAddrInTail, Value tupleStart,
-                            Value tailAddr,
-                            std::optional<Location> locArg = std::nullopt);
+  Value genABITupleEncoding(
+      Type ty, Value src, Value dstAddr, bool dstAddrInTail, Value tupleStart,
+      Value tailAddr, std::optional<Location> locArg = std::nullopt,
+      std::optional<sol::DataLocation> srcDataLoc = std::nullopt);
 
   /// Generates the tuple encoder code as per the ABI and returns the address at
   /// the end of the tuple.
