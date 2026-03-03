@@ -1778,7 +1778,8 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
           preparedVal = r.create<arith::ShRUIOp>(
               loc, remappedVal, bExt.genI256Const(256 - numBits));
         } else if (auto intTy = dyn_cast<IntegerType>(op.getVal().getType())) {
-          numBits = intTy.getWidth();
+          // In storage packing, bool occupies 1 byte not a single bit.
+          numBits = intTy.getWidth() == 1 ? 8 : intTy.getWidth();
           // zext to i256
           preparedVal =
               bExt.genIntCast(/*width=*/256, /*isSigned=*/false, remappedVal);

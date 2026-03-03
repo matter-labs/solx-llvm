@@ -102,7 +102,8 @@ unsigned evm::getStorageByteSize(Type ty) {
   assert(canBePacked(ty) && "Only packable types have byte size");
 
   if (auto intTy = dyn_cast<IntegerType>(ty))
-    return intTy.getWidth() / 8;
+    // Bool occupies 1 byte in storage.
+    return intTy.getWidth() == 1 ? 1 : intTy.getWidth() / 8;
 
   if (auto bytesTy = dyn_cast<sol::BytesType>(ty))
     return bytesTy.getSize();
