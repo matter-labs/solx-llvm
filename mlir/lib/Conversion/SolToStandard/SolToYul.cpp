@@ -1630,8 +1630,8 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
 
       auto ld = evmB.genLoad(addr, dataLoc);
       if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
-        Value castedRes =
-            bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), ld);
+        Value castedRes = bExt.genIntCastWithBoolCleanup(
+            intTy.getWidth(), intTy.isSigned(), ld, loc);
         r.replaceOp(op, castedRes);
         return success();
       }
@@ -1662,8 +1662,9 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
                                               bExt.genI256Const(256 - numBits));
           r.replaceOp(op, res);
         } else if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
-          Value castedRes =
-              bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), shifted);
+          Value castedRes = bExt.genIntCastWithBoolCleanup(
+              intTy.getWidth(), intTy.isSigned(), shifted, loc,
+              /*maskBoolAsStorageByte=*/true);
           r.replaceOp(op, castedRes);
         } else if (isa<sol::FuncRefType>(eltTy)) {
           // FuncRef is 64 bits, mask to lower 64 bits.

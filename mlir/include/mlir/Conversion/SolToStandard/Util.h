@@ -123,6 +123,13 @@ public:
   Value genIntCast(unsigned width, bool isSigned, Value val,
                    std::optional<Location> locArg = std::nullopt);
 
+  /// Same as genIntCast, except bool types use 'x != 0' cleanup semantics
+  // (same as Yul) instead of truncation. If maskBoolAsStorageByte is true,
+  // bool cleanup first masks to low 8 bits (storage bool semantics).
+  Value genIntCastWithBoolCleanup(unsigned width, bool isSigned, Value val,
+                                  std::optional<Location> locArg = std::nullopt,
+                                  bool maskBoolAsStorageByte = false);
+
   Value genCastToIdx(Value val, std::optional<Location> locArg = std::nullopt) {
     assert(val.getType() == b.getIntegerType(256));
     return b.create<arith::IndexCastUIOp>(locArg ? *locArg : defLoc,

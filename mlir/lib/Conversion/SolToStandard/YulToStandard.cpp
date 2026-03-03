@@ -795,6 +795,7 @@ struct LoadImmutableOpLowering
     }
 
     if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
+      // TODO: Check if we need to call genIntCastWithBoolCleanup here.
       Value castedRepl =
           bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), repl);
       r.replaceOp(op, castedRepl);

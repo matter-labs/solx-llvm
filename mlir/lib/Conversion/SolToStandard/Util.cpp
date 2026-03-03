@@ -42,6 +42,25 @@ Value BuilderExt::genIntCast(unsigned width, bool isSigned, Value val,
   return b.create<arith::ExtUIOp>(loc, dstSignlessType, val);
 }
 
+Value BuilderExt::genIntCastWithBoolCleanup(unsigned width, bool isSigned,
+                                            Value val,
+                                            std::optional<Location> locArg,
+                                            bool maskBoolAsStorageByte) {
+  auto srcType = cast<IntegerType>(val.getType());
+  if (width == 1 && srcType.getWidth() > 1) {
+    Location loc = locArg ? *locArg : defLoc;
+    if (maskBoolAsStorageByte) {
+      Value lowBitsMask = b.create<arith::ConstantOp>(
+          loc, b.getIntegerAttr(srcType,
+                                APInt::getLowBitsSet(srcType.getWidth(), 8)));
+      val = b.create<arith::AndIOp>(loc, val, lowBitsMask);
+    }
+    Value zero = b.create<arith::ConstantOp>(loc, b.getIntegerAttr(srcType, 0));
+    return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, val, zero);
+  }
+  return genIntCast(width, isSigned, val, locArg);
+}
+
 sol::FuncOp BuilderExt::getOrInsertFuncOp(StringRef name, FunctionType fnTy,
                                           LLVM::Linkage linkage, ModuleOp mod,
                                           std::vector<NamedAttribute> attrs) {

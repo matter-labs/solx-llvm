@@ -138,20 +138,13 @@ Value evm::Builder::normalizeABIScalarForEncoding(
     if (valTy.getWidth() == intTy.getWidth())
       return bExt.genIntCast(/*width=*/256, intTy.isSigned(), val, loc);
 
-    Value normalized;
-    if (intTy.getWidth() == 1)
-      // Follow what Yul does for bool values 'iszero(iszero(x))' which is
-      // effectively a 'x != 0'.
-      normalized = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, val,
-                                           bExt.genI256Const(0));
-    else
-      // Do the truncation for non-bool integers.
-      normalized =
-          bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), val, loc);
+    // For bool, use 'x != 0' cleanup, otherwise regular integer cast.
+    Value trunc = bExt.genIntCastWithBoolCleanup(intTy.getWidth(),
+                                                 intTy.isSigned(), val, loc);
 
     // Finally, extend to 256 bits.
-    normalized =
-        bExt.genIntCast(/*width=*/256, intTy.isSigned(), normalized, loc);
+    Value normalized =
+        bExt.genIntCast(/*width=*/256, intTy.isSigned(), trunc, loc);
     if (fromCalldata) {
       Value revertCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
                                                  val, normalized);
@@ -959,8 +952,8 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
     Value arg = genLoad(addr);
     if (intTy.getWidth() != 256) {
       assert(intTy.getWidth() < 256);
-      Value castedArg =
-          bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), arg);
+      Value castedArg = bExt.genIntCastWithBoolCleanup(
+          intTy.getWidth(), intTy.isSigned(), arg, loc);
 
       // Generate a revert check that checks if the decoded value is within in
       // the range of the integer type.
