@@ -258,9 +258,10 @@ void GepOp::build(OpBuilder &odsBuilder, OperationState &odsState,
   Type resTy = sol::PointerType::get(odsBuilder.getContext(), eltTy,
                                      getDataLocation(baseAddrTy));
 
-  // Don't generate pointers to reference types in storage.
+  // Don't generate pointers to reference types in storage or calldata.
   if (sol::isNonPtrRefType(eltTy) &&
-      (sol::getDataLocation(eltTy) == sol::DataLocation::Storage))
+      (sol::getDataLocation(eltTy) == sol::DataLocation::Storage ||
+       sol::getDataLocation(eltTy) == sol::DataLocation::CallData))
     resTy = eltTy;
 
   build(odsBuilder, odsState, resTy, baseAddr, idx);

@@ -137,6 +137,30 @@ private:
       Type ty, Value val, Location loc,
       std::optional<sol::DataLocation> srcDataLoc = std::nullopt);
 
+  /// Zeroes storage slots in the out-of-place data area of a storage
+  /// string/bytes at \p dstAddr that are no longer needed when the content
+  /// changes from \p oldLength to \p newLength bytes.  Called only when
+  /// \p oldLength > 31 (i.e. the old value used out-of-place storage).
+  void genClearStringStorageTail(
+      mlir::Value dstAddr, mlir::Value oldLength, mlir::Value newLength,
+      std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Returns the number of storage slots occupied by \p len elements of type
+  /// \p eltTy: ceil(len / elemsPerSlot) for packable types, len * slotsPerElt
+  /// for non-packable types.
+  mlir::Value
+  genStorageArraySlotCount(mlir::Value len, mlir::Type eltTy,
+                           std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Resizes a dynamic storage array: writes \p newLen to \p arraySlot,
+  /// then zeroes any storage slots that fall outside the new range if the
+  /// array shrank. Panics (ResourceError) if \p newLen exceeds
+  /// type(uint64).max.
+  void
+  genResizeDynStorageArray(mlir::Value arraySlot, mlir::Value newLen,
+                           mlir::Type eltTy,
+                           std::optional<mlir::Location> locArg = std::nullopt);
+
 public:
   //
   // TODO? Should we work with the high level types + OpAdaptor for the APIs
@@ -156,6 +180,25 @@ public:
   Value genAddrAtIdx(Value baseAddr, Value idx, Type ty,
                      sol::DataLocation dataLoc,
                      std::optional<Location> locArg = std::nullopt);
+
+  /// Given the address of an ABI relative-offset word in the head area of a
+  /// calldata value (\p headSlotAddr) and the absolute start of that value's
+  /// data section (\p outerDataBase), reconstructs the fat pointer
+  /// {innerDataPtr, innerLength} for the pointed-to dynamically-sized ABI
+  /// element (e.g., dynamic array, string, or bytes).
+  Value genCalldataDynEltFatPtr(Value headSlotAddr, Value outerDataBase,
+                                std::optional<Location> locArg = std::nullopt);
+
+  /// Resolves a calldata head-slot address to the effective address of an
+  /// element whose type has dynamic ABI content
+  /// (i.e., \c hasDynamicallySizedElt(\p eltTy) is true).
+  ///
+  /// - Truly dynamic types (string / T[]): reads the head slot as a fat
+  ///   pointer {dataPtr, len} via genCalldataDynEltFatPtr.
+  /// - Static types with dynamic content (e.g. string[N]): reads the head
+  ///   slot as a relative offset and returns \p dataBase + offset.
+  Value genCalldataEltAddr(Value headSlotAddr, Value dataBase, mlir::Type eltTy,
+                           std::optional<Location> locArg = std::nullopt);
 
   /// Generates {slot, offset} for packed storage array indexing.
   Value genPackedStorageAddr(Value baseSlot, Value idx, Type eltTy,
@@ -219,6 +262,19 @@ public:
       mlir::Value src, mlir::Type ty, mlir::Value dstDataAddr,
       std::optional<mlir::Location> locArg = std::nullopt);
 
+  /// Zeroes storage elements [\p startIdx, \p endIdx) of the storage array
+  /// \p arrTy at \p arraySlot.  For a dynamic array, \p arraySlot is the
+  /// length slot and the data area is keccak256(\p arraySlot).  For a static
+  /// array, \p arraySlot is also the base of the data area.  Dynamic
+  /// sub-arrays and strings are cleared recursively.
+  ///
+  /// Currently supports only arrays whose leaf element type is either
+  /// \c StringType or an integer that occupies a full 32-byte storage slot.
+  void
+  genClearStorageArrayTail(mlir::Value arraySlot, mlir::sol::ArrayType arrTy,
+                           mlir::Value startIdx, mlir::Value endIdx,
+                           std::optional<mlir::Location> locArg = std::nullopt);
+
   /// Copies a string from \p src (any data location encoded in \p ty) to the
   /// storage slot \p dstAddr, handling in-place / out-of-place encoding and
   /// zeroing storage slots no longer needed by the new value.
@@ -227,8 +283,11 @@ public:
                          std::optional<mlir::Location> locArg = std::nullopt);
 
   /// Copies an object of type \p ty from \p srcAddr to \p dstAddr.
-  void genCopy(mlir::Type ty, mlir::Value srcAddr, mlir::Value dstAddr,
-               mlir::sol::DataLocation srcDataLoc,
+  ///
+  /// Currently supports only arrays whose leaf element type is either
+  /// \c StringType or an integer that occupies a full 32-byte storage slot.
+  void genCopy(mlir::Type srcTy, mlir::Type dstTy, mlir::Value srcAddr,
+               mlir::Value dstAddr, mlir::sol::DataLocation srcDataLoc,
                mlir::sol::DataLocation dstDataLoc,
                std::optional<mlir::Location> locArg = std::nullopt);
 

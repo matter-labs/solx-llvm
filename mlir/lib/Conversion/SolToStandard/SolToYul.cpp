@@ -1746,6 +1746,19 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
         }
         assert(addrAtIdx);
 
+        // For calldata pointers to inner elements that have dynamic content,
+        // resolve the ABI relative-offset word in the head area.
+        Type eltTy = arrTy.getEltType();
+        if (dataLoc == sol::DataLocation::CallData &&
+            sol::hasDynamicallySizedElt(eltTy)) {
+          Value outerDataBase =
+              arrTy.isDynSized()
+                  ? evmB.genDataAddrPtr(remappedBaseAddr, baseAddrTy)
+                  : remappedBaseAddr;
+          addrAtIdx =
+              evmB.genCalldataEltAddr(addrAtIdx, outerDataBase, eltTy, loc);
+        }
+
         res = addrAtIdx;
 
         // Memory/calldata struct
@@ -2082,21 +2095,21 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
 struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
   using OpConversionPattern<sol::DataLocCastOp>::OpConversionPattern;
 
-  Value genCopy(Value srcAddr, Type ty, PatternRewriter &r,
-                Location loc) const {
+  // srcDataLoc is passed explicitly because scalar element types (e.g. ui256)
+  // carry no data-location annotation and sol::getDataLocation would return
+  // Stack for them.  The top-level caller derives it from the array type; all
+  // recursive calls propagate it directly.
+  Value genCopy(Value srcAddr, Type ty, sol::DataLocation srcDataLoc,
+                PatternRewriter &r, Location loc) const {
     mlir::solgen::BuilderExt bExt(r, loc);
     evm::Builder evmB(r, loc);
 
-    sol::DataLocation srcDataLoc = sol::DataLocation::Storage;
     sol::DataLocation dstDataLoc = sol::DataLocation::Memory;
-    assert((srcDataLoc == sol::DataLocation::Storage &&
-            dstDataLoc == sol::DataLocation::Memory) &&
-           "FIXME");
 
     if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
       Value size, dstAddr, dstDataAddr, srcDataAddr;
       if (arrTy.isDynSized()) {
-        size = evmB.genLoad(srcAddr, srcDataLoc);
+        size = evmB.genDynSize(srcAddr, ty);
         dstAddr = evmB.genMemAllocForDynArray(
             size, r.create<arith::MulIOp>(loc, size, bExt.genI256Const(32)));
         dstDataAddr = evmB.genDataAddrPtr(dstAddr, dstDataLoc);
@@ -2107,6 +2120,14 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
         dstDataAddr = dstAddr;
         srcDataAddr = srcAddr;
       }
+
+      // Determine element data location: inner array types carry it explicitly;
+      // scalar elements inherit from the parent array.
+      Type eltTy = arrTy.getEltType();
+      sol::DataLocation eltSrcDataLoc = sol::getDataLocation(eltTy);
+      if (eltSrcDataLoc == sol::DataLocation::Stack)
+        eltSrcDataLoc = srcDataLoc;
+
       r.create<scf::ForOp>(
           loc, /*lowerBound=*/bExt.genIdxConst(0),
           /*upperBound=*/bExt.genCastToIdx(size),
@@ -2119,11 +2140,43 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
                                                srcDataLoc, loc);
             Value dstAddrI = evmB.genAddrAtIdx(dstDataAddr, i256IndVar, arrTy,
                                                dstDataLoc, loc);
-            evmB.genStore(genCopy(srcAddrI, arrTy.getEltType(), r, loc),
-                          dstAddrI, dstDataLoc);
+            // For calldata sources with dynamic inner elements, resolve the ABI
+            // relative-offset word in the head area.
+            if (srcDataLoc == sol::DataLocation::CallData &&
+                sol::hasDynamicallySizedElt(eltTy))
+              srcAddrI =
+                  evmB.genCalldataEltAddr(srcAddrI, srcDataAddr, eltTy, loc);
+            Value subElm = genCopy(srcAddrI, eltTy, eltSrcDataLoc, r, loc);
+            evmB.genStore(subElm, dstAddrI, dstDataLoc);
             r.create<scf::YieldOp>(loc);
           });
       return dstAddr;
+    }
+
+    if (isa<sol::StringType>(ty)) {
+      if (srcDataLoc == sol::DataLocation::CallData) {
+        Value sizeInBytes = evmB.genDynSize(srcAddr, ty);
+        Value memAddr = evmB.genMemAllocForDynArray(
+            sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
+        Value srcDataAddr = evmB.genDataAddrPtr(srcAddr, srcDataLoc, loc);
+        Value dstDataAddr = evmB.genDataAddrPtr(memAddr, dstDataLoc, loc);
+        r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
+                                      sizeInBytes);
+        return memAddr;
+      }
+      if (srcDataLoc == sol::DataLocation::Storage) {
+        Value sizeSlot = evmB.genLoad(srcAddr, srcDataLoc, loc);
+        Value size = evmB.genStorageStringLength(sizeSlot, loc);
+        Value dstAddr = evmB.genMemAllocForDynArray(
+            size, bExt.genRoundUpToMultiple<32>(size));
+        Value dstDataAddr =
+            evmB.genDataAddrPtr(dstAddr, sol::DataLocation::Memory, loc);
+        evmB.genStore(size, dstAddr, sol::DataLocation::Memory, loc);
+        evmB.genCopyStringDataFromStorageToMemory(srcAddr, sizeSlot, size,
+                                                  dstDataAddr, loc);
+        return dstAddr;
+      }
+      llvm_unreachable("NYI: StringType source data location");
     }
 
     assert(isa<IntegerType>(ty) && "NYI");
@@ -2133,7 +2186,6 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
   LogicalResult matchAndRewrite(sol::DataLocCastOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    mlir::solgen::BuilderExt bExt(r, loc);
     evm::Builder evmB(r, loc);
 
     Type srcTy = op.getInp().getType();
@@ -2141,45 +2193,10 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
     sol::DataLocation srcDataLoc = sol::getDataLocation(srcTy);
     sol::DataLocation dstDataLoc = sol::getDataLocation(dstTy);
 
-    if (dstDataLoc == sol::DataLocation::Memory) {
-      // String type
-      if (isa<sol::StringType>(srcTy)) {
-        if (srcDataLoc == sol::DataLocation::CallData) {
-          Value sizeInBytes = evmB.genDynSize(adaptor.getInp(), srcTy);
-          Value memAddr = evmB.genMemAllocForDynArray(
-              sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
-          Value srcDataAddr =
-              evmB.genDataAddrPtr(adaptor.getInp(), srcDataLoc, loc);
-          Value dstDataAddr = evmB.genDataAddrPtr(memAddr, dstDataLoc, loc);
-
-          r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
-                                        sizeInBytes);
-          r.replaceOp(op, memAddr);
-          return success();
-        }
-        if (srcDataLoc == sol::DataLocation::Storage) {
-          // Generate the memory allocation.
-          Value sizeSlot = evmB.genLoad(adaptor.getInp(), srcDataLoc, loc);
-          Value size = evmB.genStorageStringLength(sizeSlot, loc);
-          Value dstAddr = evmB.genMemAllocForDynArray(
-              size, bExt.genRoundUpToMultiple<32>(size));
-          Value dstDataAddr =
-              evmB.genDataAddrPtr(dstAddr, sol::DataLocation::Memory, loc);
-
-          // Store the size.
-          evmB.genStore(size, dstAddr, sol::DataLocation::Memory, loc);
-          evmB.genCopyStringDataFromStorageToMemory(adaptor.getInp(), sizeSlot,
-                                                    size, dstDataAddr, loc);
-
-          r.replaceOp(op, dstAddr);
-          return success();
-        }
-      }
-
-      if (isa<sol::ArrayType>(srcTy)) {
-        r.replaceOp(op, genCopy(adaptor.getInp(), srcTy, r, loc));
-        return success();
-      }
+    if (dstDataLoc == sol::DataLocation::Memory &&
+        (isa<sol::StringType>(srcTy) || isa<sol::ArrayType>(srcTy))) {
+      r.replaceOp(op, genCopy(adaptor.getInp(), srcTy, srcDataLoc, r, loc));
+      return success();
     }
 
     llvm_unreachable("NYI");
@@ -2276,7 +2293,7 @@ struct CopyOpLowering : public OpConversionPattern<sol::CopyOp> {
     sol::DataLocation srcDataLoc = sol::getDataLocation(srcTy);
     sol::DataLocation dstDataLoc = sol::getDataLocation(dstTy);
 
-    evmB.genCopy(srcTy, adaptor.getSrc(), adaptor.getDst(), srcDataLoc,
+    evmB.genCopy(srcTy, dstTy, adaptor.getSrc(), adaptor.getDst(), srcDataLoc,
                  dstDataLoc, loc);
     r.eraseOp(op);
     return success();

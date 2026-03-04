@@ -175,8 +175,10 @@ evm::SolTypeConverter::SolTypeConverter() {
     case sol::DataLocation::Stack:
       return LLVM::LLVMPointerType::get(ty.getContext());
 
-    // Map to calldata/memory address.
     case sol::DataLocation::CallData:
+      return i256Ty;
+
+    // Map to calldata/memory address.
     case sol::DataLocation::Memory:
     case sol::DataLocation::Immutable:
       return i256Ty;

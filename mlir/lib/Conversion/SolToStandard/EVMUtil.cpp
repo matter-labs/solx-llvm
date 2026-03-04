@@ -547,7 +547,11 @@ Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
     } else {
       Value addr = dataPtr;
       for (auto val : initVals) {
-        b.create<yul::MStoreOp>(loc, addr, val);
+        // Zero-extend values before storing them, as skipping this step may
+        // lead to incorrect results. For example, uint8 is stored via mstore8
+        // instead of mstore.
+        Value val256 = bExt.genIntCast(256, /*isSigned=*/false, val);
+        b.create<yul::MStoreOp>(loc, addr, val256);
         addr = b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(32));
       }
     }
@@ -656,6 +660,14 @@ Value evm::Builder::genAddrAtIdx(Value baseAddr, Value idx, Type ty,
     return b.create<arith::AddIOp>(loc, baseAddr, memIdx);
   }
 
+  if (dataLoc == sol::DataLocation::CallData) {
+    unsigned stride = 32;
+    if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
+      stride = getCallDataHeadSize(arrTy.getEltType());
+    Value memIdx = b.create<arith::MulIOp>(loc, idx, bExt.genI256Const(stride));
+    return b.create<arith::AddIOp>(loc, baseAddr, memIdx);
+  }
+
   if (dataLoc == sol::DataLocation::Storage) {
     Value stride;
     if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
@@ -667,6 +679,30 @@ Value evm::Builder::genAddrAtIdx(Value baseAddr, Value idx, Type ty,
   }
 
   llvm_unreachable("NYI");
+}
+
+Value evm::Builder::genCalldataDynEltFatPtr(Value headSlotAddr,
+                                            Value outerDataBase,
+                                            std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+  Value relOffset = b.create<yul::CallDataLoadOp>(loc, headSlotAddr);
+  Value innerBase = b.create<arith::AddIOp>(loc, outerDataBase, relOffset);
+  Value innerLen = b.create<yul::CallDataLoadOp>(loc, innerBase);
+  Value innerData =
+      b.create<arith::AddIOp>(loc, innerBase, bExt.genI256Const(32));
+  return bExt.genLLVMStruct({innerData, innerLen});
+}
+
+Value evm::Builder::genCalldataEltAddr(Value headSlotAddr, Value dataBase,
+                                       mlir::Type eltTy,
+                                       std::optional<Location> locArg) {
+  assert(sol::hasDynamicallySizedElt(eltTy));
+  Location loc = locArg ? *locArg : defLoc;
+  if (sol::isDynamicallySized(eltTy))
+    return genCalldataDynEltFatPtr(headSlotAddr, dataBase, loc);
+  Value relOffset = genLoad(headSlotAddr, sol::DataLocation::CallData, loc);
+  return b.create<arith::AddIOp>(loc, dataBase, relOffset);
 }
 
 static std::pair<Value, Value>
@@ -881,6 +917,47 @@ static Value getI256MSBMaskedValue(OpBuilder &b, Value val, Value maskLen,
   return b.create<mlir::arith::AndIOp>(loc, val, mask);
 }
 
+void evm::Builder::genClearStringStorageTail(Value dstAddr, Value oldLength,
+                                             Value newLength,
+                                             std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  // Only the out-of-place (long) form uses extra data slots; short strings
+  // (≤31 bytes) are fully self-contained in the length slot.
+  Value cleanCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt,
+                                            oldLength, bExt.genI256Const(31));
+  auto ifClean = b.create<scf::IfOp>(loc, cleanCond);
+  b.setInsertionPointToStart(&ifClean.getThenRegion().front());
+  {
+    Value dstDataArea =
+        genDataAddrPtr(dstAddr, sol::DataLocation::Storage, loc);
+
+    // If the new string fits in-place (newLength < 32), all old data slots
+    // can be cleared. Otherwise, preserve the first ceil(newLength/32) slots.
+    Value deleteStart = b.create<arith::AddIOp>(
+        loc, dstDataArea, bExt.genCeilDivision<32>(newLength));
+    Value isInPlace = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
+                                              newLength, bExt.genI256Const(32));
+    deleteStart =
+        b.create<arith::SelectOp>(loc, isInPlace, dstDataArea, deleteStart);
+
+    Value deleteEnd = b.create<arith::AddIOp>(
+        loc, dstDataArea, bExt.genCeilDivision<32>(oldLength));
+
+    b.create<scf::ForOp>(
+        loc, /*lowerBound=*/bExt.genCastToIdx(deleteStart),
+        /*upperBound=*/bExt.genCastToIdx(deleteEnd),
+        /*step=*/bExt.genIdxConst(1), /*iterArgs=*/ArrayRef<Value>(),
+        [&](OpBuilder &b, Location loc, Value indVar, ValueRange) {
+          b.create<yul::SStoreOp>(loc, bExt.genCastToI256(indVar),
+                                  bExt.genI256Const(0, loc));
+          b.create<scf::YieldOp>(loc);
+        });
+  }
+  b.setInsertionPointAfter(ifClean);
+}
+
 void evm::Builder::genCopyStringToStorage(Value src, Type ty, Value dstAddr,
                                           std::optional<Location> locArg) {
   // Storage layout for `bytes` / `string` in Solidity:
@@ -923,40 +1000,8 @@ void evm::Builder::genCopyStringToStorage(Value src, Type ty, Value dstAddr,
 
   Value oldLength = genStorageStringLength(
       genLoad(dstAddr, sol::DataLocation::Storage, loc), loc);
-  // Remove the old string data by zeroing storage slots that are no longer
-  // part of the new value. We do this if the old string has length > 31 bytes.
-  {
-    Value cleanCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt,
-                                              oldLength, bExt.genI256Const(31));
-
-    auto ifClean = b.create<scf::IfOp>(loc, cleanCond);
-
-    b.setInsertionPointToStart(&ifClean.getThenRegion().front());
-    Value dstDataArea =
-        genDataAddrPtr(dstAddr, sol::DataLocation::Storage, loc);
-    Value deleteStart = b.create<mlir::arith::AddIOp>(
-        loc, dstDataArea, bExt.genCeilDivision<32>(length));
-    Value shortStringCond = b.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::ult, length, bExt.genI256Const(32));
-
-    deleteStart = b.create<arith::SelectOp>(loc, shortStringCond, dstDataArea,
-                                            deleteStart);
-    Value deleteEnd = b.create<mlir::arith::AddIOp>(
-        loc, dstDataArea, bExt.genCeilDivision<32>(oldLength));
-    b.create<scf::ForOp>(
-        loc, /*lowerBound=*/bExt.genCastToIdx(deleteStart),
-        /*upperBound=*/bExt.genCastToIdx(deleteEnd),
-        /*step=*/bExt.genIdxConst(1),
-        /*iterArgs=*/ArrayRef<Value>(),
-        /*builder=*/
-        [&](OpBuilder &b, Location loc, Value indVar, ValueRange iterArgs) {
-          Value i256IndVar = bExt.genCastToI256(indVar);
-          b.create<yul::SStoreOp>(loc, i256IndVar, bExt.genI256Const(0, loc));
-          b.create<scf::YieldOp>(loc);
-        });
-
-    b.setInsertionPointAfter(ifClean);
-  }
+  // Zero any out-of-place data slots that are no longer needed.
+  genClearStringStorageTail(dstAddr, oldLength, length, loc);
 
   // Handle out of place case.
   Value outOfPlaceCond = b.create<arith::CmpIOp>(
@@ -1055,6 +1100,111 @@ void evm::Builder::genCopyStringToStorage(Value src, Type ty, Value dstAddr,
     b.create<yul::SStoreOp>(loc, dstAddr, bExt.genI256Const(0, loc));
   }
   b.setInsertionPointAfter(ifOutOfPlace);
+}
+
+Value evm::Builder::genStorageArraySlotCount(Value len, Type eltTy,
+                                             std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  if (sol::canBePacked(eltTy)) {
+    // Multiple elements share a slot: ceil(len / elemsPerSlot).
+    unsigned byteSize = sol::getStorageByteSize(eltTy);
+    unsigned elemsPerSlot = 32 / byteSize;
+    Value padded =
+        b.create<arith::AddIOp>(loc, len, bExt.genI256Const(elemsPerSlot - 1));
+    return b.create<arith::DivUIOp>(loc, padded,
+                                    bExt.genI256Const(elemsPerSlot));
+  }
+  // Non-packable: each element occupies getStorageSlotCount(eltTy) slots.
+  unsigned slotsPerElt = sol::getStorageSlotCount(eltTy);
+  if (slotsPerElt == 1)
+    return len;
+  return b.create<arith::MulIOp>(loc, len, bExt.genI256Const(slotsPerElt));
+}
+
+void evm::Builder::genClearStorageArrayTail(Value arraySlot,
+                                            sol::ArrayType arrTy,
+                                            Value startIdx, Value endIdx,
+                                            std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  Type eltTy = arrTy.getEltType();
+  // For dynamic arrays the data lives at keccak256(arraySlot); for static
+  // arrays it lives directly at arraySlot.
+  Value dataStart =
+      arrTy.isDynSized()
+          ? genDataAddrPtr(arraySlot, sol::DataLocation::Storage, loc)
+          : arraySlot;
+
+  Value needsClear =
+      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, startIdx, endIdx);
+  auto ifClear = b.create<scf::IfOp>(loc, needsClear, /*withElseRegion=*/false);
+  b.setInsertionPointToStart(&ifClear.getThenRegion().front());
+  {
+    Value deleteStart = b.create<arith::AddIOp>(
+        loc, dataStart, genStorageArraySlotCount(startIdx, eltTy, loc));
+    Value deleteEnd = b.create<arith::AddIOp>(
+        loc, dataStart, genStorageArraySlotCount(endIdx, eltTy, loc));
+    Value numSlots = b.create<arith::SubIOp>(loc, deleteEnd, deleteStart);
+
+    b.create<scf::ForOp>(
+        loc, /*lowerBound=*/bExt.genIdxConst(0),
+        /*upperBound=*/bExt.genCastToIdx(numSlots),
+        /*step=*/bExt.genIdxConst(1), /*iterArgs=*/ArrayRef<Value>(),
+        [&](OpBuilder &b, Location loc, Value i, ValueRange) {
+          Value slot =
+              b.create<arith::AddIOp>(loc, deleteStart, bExt.genCastToI256(i));
+          if (auto innerArrTy = dyn_cast<sol::ArrayType>(eltTy);
+              innerArrTy && innerArrTy.isDynSized()) {
+            // Dynamic sub-array: read old length, zero the length slot, then
+            // recursively clear the data area without a panic check (newIdx=0).
+            Value oldLen = genLoad(slot, sol::DataLocation::Storage, loc);
+            genStore(bExt.genI256Const(0, loc), slot,
+                     sol::DataLocation::Storage, loc);
+            genClearStorageArrayTail(slot, innerArrTy,
+                                     bExt.genI256Const(0, loc), oldLen, loc);
+          } else if (isa<sol::StringType>(eltTy)) {
+            // string/bytes: clear out-of-place data slots first, then zero
+            // the length slot itself.
+            Value zero = bExt.genI256Const(0, loc);
+            Value strOldLen = genStorageStringLength(
+                genLoad(slot, sol::DataLocation::Storage, loc), loc);
+            genClearStringStorageTail(slot, strOldLen, zero, loc);
+            b.create<yul::SStoreOp>(loc, slot, zero);
+          } else {
+            // Scalar, packed, or fixed-size element: zero the slot directly.
+            b.create<yul::SStoreOp>(loc, slot, bExt.genI256Const(0, loc));
+          }
+          b.create<scf::YieldOp>(loc);
+        });
+  }
+  b.setInsertionPointAfter(ifClear);
+}
+
+void evm::Builder::genResizeDynStorageArray(Value arraySlot, Value newLen,
+                                            Type eltTy,
+                                            std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+
+  // Panic if newLen > type(uint64).max (ResourceError / too-large array).
+  mlir::solgen::BuilderExt bExt(b, loc);
+  Value panicCond = b.create<arith::CmpIOp>(
+      loc, arith::CmpIPredicate::ugt, newLen,
+      bExt.genI256Const(APInt::getLowBitsSet(256, 64), loc));
+  genPanic(PanicCode::ResourceError, panicCond, loc);
+
+  // Read the old length before overwriting it.
+  Value oldLen = genLoad(arraySlot, sol::DataLocation::Storage, loc);
+
+  // Write the new length.
+  genStore(newLen, arraySlot, sol::DataLocation::Storage, loc);
+
+  // Zero out storage slots that fall outside the new range.
+  auto dynArrTy = sol::ArrayType::get(b.getContext(), /*size=*/-1, eltTy,
+                                      sol::DataLocation::Storage);
+  genClearStorageArrayTail(arraySlot, dynArrTy, newLen, oldLen, loc);
 }
 
 Value evm::Builder::genCopyStringDataToMemory(Value src, Type ty,
@@ -1390,22 +1540,51 @@ void evm::Builder::genPopString(Value srcAddr, Value oldData, Value length,
   b.setInsertionPointAfter(ifConvertToPacked);
 }
 
-void evm::Builder::genCopy(Type ty, Value srcAddr, Value dstAddr,
+void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
                            sol::DataLocation srcDataLoc,
                            sol::DataLocation dstDataLoc,
                            std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
-    Value length, dstDataAddr, srcDataAddr;
-    if (arrTy.isDynSized())
-      llvm_unreachable("NYI");
+  // If the source and destination are the same, skip the copy.
+  if (srcAddr == dstAddr)
+    return;
 
-    length = bExt.genI256Const(arrTy.getSize());
-    dstDataAddr = dstAddr;
-    srcDataAddr = srcAddr;
-    Type eltTy = arrTy.getEltType();
+  if (auto dstArrTy = dyn_cast<sol::ArrayType>(dstTy)) {
+    auto srcArrTy = dyn_cast<sol::ArrayType>(srcTy);
+    assert(srcArrTy);
+    Value length, dstDataAddr, srcDataAddr;
+    if (dstArrTy.isDynSized()) {
+      if (srcArrTy.isDynSized()) {
+        length = genDynSize(srcAddr, srcTy);
+        srcDataAddr = genDataAddrPtr(srcAddr, srcDataLoc, loc);
+      } else {
+        length = bExt.genI256Const(srcArrTy.getSize());
+        srcDataAddr = srcAddr;
+      }
+      // Update dst array length.
+      if (dstDataLoc == sol::DataLocation::Storage)
+        genResizeDynStorageArray(dstAddr, length, dstArrTy.getEltType(), loc);
+      else
+        genStore(length, dstAddr, dstDataLoc, loc);
+
+      dstDataAddr = genDataAddrPtr(dstAddr, dstDataLoc, loc);
+    } else {
+      // Static destination array: loop over the source length, then zero any
+      // tail slots in the destination that the source doesn't cover.
+      assert(srcArrTy);
+      length = bExt.genI256Const(srcArrTy.getSize());
+      dstDataAddr = dstAddr;
+      srcDataAddr = srcAddr;
+      if (dstDataLoc == sol::DataLocation::Storage &&
+          srcArrTy.getSize() < dstArrTy.getSize()) {
+        genClearStorageArrayTail(dstAddr, dstArrTy,
+                                 bExt.genI256Const(srcArrTy.getSize()),
+                                 bExt.genI256Const(dstArrTy.getSize()), loc);
+      }
+    }
+    Type eltTy = dstArrTy.getEltType();
 
     b.create<scf::ForOp>(
         loc, /*lowerBound=*/bExt.genIdxConst(0),
@@ -1416,29 +1595,34 @@ void evm::Builder::genCopy(Type ty, Value srcAddr, Value dstAddr,
         [&](OpBuilder &b, Location loc, Value indVar, ValueRange initArgs) {
           Value i256IndVar = bExt.genCastToI256(indVar);
           Value srcAddrI =
-              genAddrAtIdx(srcDataAddr, i256IndVar, arrTy, srcDataLoc, loc);
+              genAddrAtIdx(srcDataAddr, i256IndVar, srcArrTy, srcDataLoc, loc);
           Value dstAddrI =
-              genAddrAtIdx(dstDataAddr, i256IndVar, arrTy, dstDataLoc, loc);
+              genAddrAtIdx(dstDataAddr, i256IndVar, dstArrTy, dstDataLoc, loc);
 
-          // Reference type elements store pointers to heap-allocated objects.
+          // Reference type elements store pointers / offsets that need
+          // resolving before recursing.
           if (sol::isNonPtrRefType(eltTy)) {
+            if (srcDataLoc == sol::DataLocation::CallData &&
+                sol::hasDynamicallySizedElt(eltTy))
+              srcAddrI = genCalldataEltAddr(srcAddrI, srcDataAddr, eltTy, loc);
             if (srcDataLoc == sol::DataLocation::Memory)
               srcAddrI = genLoad(srcAddrI, srcDataLoc, loc);
             if (dstDataLoc == sol::DataLocation::Memory)
               dstAddrI = genLoad(dstAddrI, dstDataLoc, loc);
           }
-          genCopy(arrTy.getEltType(), srcAddrI, dstAddrI, srcDataLoc,
-                  dstDataLoc, loc);
+          genCopy(srcArrTy.getEltType(), dstArrTy.getEltType(), srcAddrI,
+                  dstAddrI, srcDataLoc, dstDataLoc, loc);
           b.create<scf::YieldOp>(loc);
         });
-  } else if (isa<IntegerType>(ty)) {
+  } else if (isa<IntegerType>(dstTy)) {
     genStore(genLoad(srcAddr, srcDataLoc, loc), dstAddr, dstDataLoc, loc);
-  } else if (isa<sol::StringType>(ty)) {
+  } else if (isa<sol::StringType>(dstTy)) {
     if (dstDataLoc == sol::DataLocation::Storage) {
-      genCopyStringToStorage(srcAddr, ty, dstAddr, loc);
+      genCopyStringToStorage(srcAddr, srcTy, dstAddr, loc);
     } else if (dstDataLoc == sol::DataLocation::Memory) {
       Value dstDataAddr = genDataAddrPtr(dstAddr, dstDataLoc, loc);
-      Value length = genCopyStringDataToMemory(srcAddr, ty, dstDataAddr, loc);
+      Value length =
+          genCopyStringDataToMemory(srcAddr, srcTy, dstDataAddr, loc);
       // Write the string length.
       genStore(length, dstAddr, dstDataLoc, loc);
     }
