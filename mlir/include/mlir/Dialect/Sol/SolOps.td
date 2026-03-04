@@ -781,6 +781,16 @@ def Sol_NewOp : Sol_Op<"new", [AttrSizedOperandSegments]> {
   }];
 }
 
+def Sol_ObjectCodeOp : Sol_Op<"object_code"> {
+  let arguments = (ins StrAttr:$objName);
+  // FIXME: AnyType -> Sol_StringType causes the asm printer to miss the prefix!
+  let results = (outs AnyType:$out);
+
+  let assemblyFormat = [{
+    $objName attr-dict `:` type($out)
+  }];
+}
+
 def Sol_CodeOp : Sol_Op<"code"> {
   let arguments = (ins Sol_AddressType:$contAddr);
   // FIXME: AnyType -> Sol_StringType causes the asm printer to miss the prefix!
