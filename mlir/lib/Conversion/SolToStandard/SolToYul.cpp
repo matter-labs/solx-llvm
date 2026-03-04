@@ -2345,6 +2345,25 @@ struct NewOpLowering : public OpConversionPattern<sol::NewOp> {
   }
 };
 
+struct ObjectCodeOpLowering : public OpConversionPattern<sol::ObjectCodeOp> {
+  using OpConversionPattern<sol::ObjectCodeOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ObjectCodeOp op, OpAdaptor /*adaptor*/,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    evm::Builder evmB(r, loc);
+
+    Value dataSize = r.create<yul::DataSizeOp>(loc, op.getObjName());
+    Value alloc = evmB.genMemAlloc(op.getType(), /*zeroInit=*/false,
+                                   /*initVals=*/{}, dataSize);
+    Value dataAddr = evmB.genDataAddrPtr(alloc, sol::DataLocation::Memory);
+    Value dataOffset = r.create<yul::DataOffsetOp>(loc, op.getObjName());
+    r.create<yul::CodeCopyOp>(loc, dataAddr, dataOffset, dataSize);
+    r.replaceOp(op, alloc);
+    return success();
+  }
+};
+
 struct CodeOpLowering : public OpConversionPattern<sol::CodeOp> {
   using OpConversionPattern<sol::CodeOp>::OpConversionPattern;
 
@@ -3385,8 +3404,8 @@ void evm::populateAbiPats(mlir::RewritePatternSet &pats,
 }
 
 void evm::populateExtCallPat(RewritePatternSet &pats, TypeConverter &tyConv) {
-  pats.add<ExtCallOpLowering, TryOpLowering, NewOpLowering, CodeOpLowering>(
-      tyConv, pats.getContext());
+  pats.add<ExtCallOpLowering, TryOpLowering, NewOpLowering, CodeOpLowering,
+           ObjectCodeOpLowering>(tyConv, pats.getContext());
 }
 
 void evm::populateEmitPat(RewritePatternSet &pats, TypeConverter &tyConv) {
