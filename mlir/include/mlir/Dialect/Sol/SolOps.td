@@ -938,6 +938,23 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
   }];
 }
 
+def Sol_SendOp : Sol_Op<"send"> {
+  let arguments = (ins Sol_AddressType:$addr, UI256:$val);
+  let results = (outs I1:$status);
+
+  let assemblyFormat = [{
+    $addr `,` $val attr-dict `:` qualified(type($addr)) `,` type($val) `->` type($status)
+  }];
+}
+
+def Sol_TransferOp : Sol_Op<"transfer"> {
+  let arguments = (ins Sol_AddressType:$addr, UI256:$val);
+
+  let assemblyFormat = [{
+    $addr `,` $val attr-dict `:` qualified(type($addr)) `,` type($val)
+  }];
+}
+
 def Sol_NewOp : Sol_Op<"new", [AttrSizedOperandSegments]> {
   let arguments = (ins StrAttr:$objName, UI256:$val,
                    Optional<UI256>:$salt,

@@ -150,6 +150,8 @@ struct ConvertSolToStandardPass
         sol::EncodeOp,
         sol::DecodeOp,
         sol::ExtCallOp,
+        sol::SendOp,
+        sol::TransferOp,
         sol::NewOp,
         sol::ObjectCodeOp,
         sol::CodeOp,

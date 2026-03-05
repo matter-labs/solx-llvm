@@ -2760,6 +2760,55 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
   }
 };
 
+/// Lowers the common value-transfer call pattern used by 'sol.send' and
+/// 'sol.transfer' and returns the requested status predicate.
+template <typename AdaptorT>
+static Value genValueTransferStatus(Location loc, AdaptorT adaptor,
+                                    arith::CmpIPredicate pred,
+                                    ConversionPatternRewriter &r) {
+  mlir::solgen::BuilderExt bExt(r, loc);
+  Value zero = bExt.genI256Const(0);
+  Value callStipend = bExt.genI256Const(2300);
+  Value valueIsZero = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              adaptor.getVal(), zero);
+  Value gas = r.create<arith::SelectOp>(loc, valueIsZero, callStipend, zero);
+
+  Value callStatus = r.create<yul::CallOp>(
+      loc, gas, adaptor.getAddr(), adaptor.getVal(),
+      /*inpOffset=*/zero, /*inpSize=*/zero, /*outOffset=*/zero,
+      /*outSize=*/zero);
+  return r.create<arith::CmpIOp>(loc, pred, callStatus, zero);
+}
+
+struct SendOpLowering : public OpConversionPattern<sol::SendOp> {
+  using OpConversionPattern<sol::SendOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::SendOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    Value status =
+        genValueTransferStatus(loc, adaptor, arith::CmpIPredicate::ne, r);
+    r.replaceOp(op, status);
+    return success();
+  }
+};
+
+struct TransferOpLowering : public OpConversionPattern<sol::TransferOp> {
+  using OpConversionPattern<sol::TransferOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::TransferOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    evm::Builder evmB(r, loc);
+
+    Value statusIsZero =
+        genValueTransferStatus(loc, adaptor, arith::CmpIPredicate::eq, r);
+    evmB.genForwardingRevert(statusIsZero);
+    r.eraseOp(op);
+    return success();
+  }
+};
+
 struct NewOpLowering : public OpConversionPattern<sol::NewOp> {
   using OpConversionPattern<sol::NewOp>::OpConversionPattern;
 
@@ -3877,7 +3926,8 @@ void evm::populateAbiPats(mlir::RewritePatternSet &pats,
 
 void evm::populateExtCallPat(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<ExtCallOpLowering, TryOpLowering, NewOpLowering, CodeOpLowering,
-           ObjectCodeOpLowering>(tyConv, pats.getContext());
+           ObjectCodeOpLowering, SendOpLowering, TransferOpLowering>(
+      tyConv, pats.getContext());
 }
 
 void evm::populateEmitPat(RewritePatternSet &pats, TypeConverter &tyConv) {
