@@ -146,6 +146,7 @@ struct ConvertSolToStandardPass
         sol::CallerOp,
         sol::LibAddrOp,
         sol::CodeHashOp,
+        sol::BalanceOp,
         sol::EncodeOp,
         sol::DecodeOp,
         sol::ExtCallOp,

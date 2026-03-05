@@ -2508,6 +2508,16 @@ struct CodeHashOpLowering : public OpConversionPattern<sol::CodeHashOp> {
   }
 };
 
+struct BalanceOpLowering : public OpConversionPattern<sol::BalanceOp> {
+  using OpConversionPattern<sol::BalanceOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::BalanceOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::BalanceOp>(op, adaptor.getContAddr());
+    return success();
+  }
+};
+
 struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
   using OpConversionPattern<sol::EncodeOp>::OpConversionPattern;
 
@@ -3855,7 +3865,8 @@ void evm::populateAddrPat(RewritePatternSet &pats, TypeConverter &tyConv) {
            ChainIdOpLowering, CoinbaseOpLowering, DifficultyOpLowering,
            GasLimitOpLowering, BlockNumberOpLowering, PrevRandaoOpLowering,
            TimestampOpLowering, GasLeftOpLowering, LibAddrOpLowering,
-           CodeHashOpLowering, CallerOpLowering>(pats.getContext());
+           CodeHashOpLowering, CallerOpLowering, BalanceOpLowering>(
+      pats.getContext());
   pats.add<SigOpLowering>(tyConv, pats.getContext());
 }
 
