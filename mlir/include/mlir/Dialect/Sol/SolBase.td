@@ -46,7 +46,21 @@ def Sol_EnumType : Sol_Type<"Enum", "enum"> {
 }
 def Sol_Int : AnyTypeOf<[Sol_EnumType, I1, AnySignedInteger,
                          AnyUnsignedInteger]>;
-def Sol_AddressType : UI<256>; // FIXME
+
+def Sol_PayableKeywordParameter : AttrOrTypeParameter<"bool", "address payability"> {
+  let defaultValue = "false";
+  let parser = [{ [&]() -> FailureOr<bool> {
+    if ($_parser.parseKeyword("payable"))
+      return failure();
+    return true;
+  }() }];
+  let printer = [{ $_printer << "payable"; }];
+}
+
+def Sol_AddressType : Sol_Type<"Address", "address"> {
+  let parameters = (ins Sol_PayableKeywordParameter:$payable);
+  let assemblyFormat = [{ (`<` $payable^ `>`)? }];
+}
 
 def Sol_BytesType : Sol_Type<"Bytes", "bytes"> {
   let parameters = (ins "uint32_t":$size);

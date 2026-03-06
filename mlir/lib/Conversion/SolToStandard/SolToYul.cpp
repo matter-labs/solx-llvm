@@ -108,6 +108,75 @@ struct CastOpLowering : public OpConversionPattern<sol::CastOp> {
   }
 };
 
+struct AddressCastOpLowering : public OpConversionPattern<sol::AddressCastOp> {
+  using OpConversionPattern<sol::AddressCastOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::AddressCastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    Type inpTy = op.getInp().getType();
+    Type outTy = op.getType();
+
+    if (isa<sol::BytesType>(inpTy) || isa<sol::BytesType>(outTy)) {
+      // bytes20 -> address
+      if (auto inpBytesTy = dyn_cast<sol::BytesType>(inpTy)) {
+        assert(inpBytesTy.getSize() == 20 &&
+               "AddressCastOp only supports bytes20");
+        assert(isa<sol::AddressType>(outTy));
+        r.replaceOpWithNewOp<arith::ShRUIOp>(op, adaptor.getInp(),
+                                             bExt.genI256Const(96));
+        return success();
+      }
+
+      // address -> bytes20
+      auto outBytesTy = cast<sol::BytesType>(outTy);
+      assert(outBytesTy.getSize() == 20 &&
+             "AddressCastOp only supports bytes20");
+      assert(isa<sol::AddressType>(inpTy));
+      r.replaceOpWithNewOp<arith::ShLIOp>(op, adaptor.getInp(),
+                                          bExt.genI256Const(96));
+      return success();
+    }
+
+    if (isa<IntegerType>(inpTy) || isa<IntegerType>(outTy)) {
+      // uint160 -> address
+      if (isa<IntegerType>(inpTy)) {
+        auto inpIntTy = cast<IntegerType>(inpTy);
+        assert(inpIntTy.getWidth() == 160 && !inpIntTy.isSigned() &&
+               "AddressCastOp only supports uint160 -> address");
+        assert(isa<sol::AddressType>(outTy));
+        // Zero-extend uint160 to 256 bits for the address representation.
+        Value zext = bExt.genIntCast(/*width=*/256, /*isSigned=*/false,
+                                     adaptor.getInp(), loc);
+        r.replaceOp(op, zext);
+        return success();
+      }
+
+      // address -> uint160
+      auto outIntTy = cast<IntegerType>(outTy);
+      assert(isa<sol::AddressType>(inpTy) && outIntTy.getWidth() == 160 &&
+             !outIntTy.isSigned() &&
+             "AddressCastOp only supports address -> uint160");
+      // Truncate the 256-bit address representation to uint160.
+      Value trunc = bExt.genIntCast(/*width=*/160, /*isSigned=*/false,
+                                    adaptor.getInp(), loc);
+      r.replaceOp(op, trunc);
+      return success();
+    }
+
+    // address -> address (payable <-> non-payable).
+    auto inpAddrTy = cast<sol::AddressType>(inpTy);
+    auto outAddrTy = cast<sol::AddressType>(outTy);
+    assert(inpAddrTy.getPayable() != outAddrTy.getPayable() &&
+           "AddressCastOp only supports payable <-> non-payable address casts");
+    Value mask = bExt.genI256Const(APInt::getLowBitsSet(256, 160));
+    r.replaceOpWithNewOp<arith::AndIOp>(op, adaptor.getInp(), mask);
+    return success();
+  }
+};
+
 struct EnumCastOpLowering : public OpConversionPattern<sol::EnumCastOp> {
   using OpConversionPattern<sol::EnumCastOp>::OpConversionPattern;
 
@@ -1654,10 +1723,13 @@ struct MapOpLowering : public OpConversionPattern<sol::MapOp> {
 
     // Setup arguments to keccak256.
     auto zero = bExt.genI256Const(0);
-    assert(isa<IntegerType>(op.getKey().getType()) && "NYI");
-    auto key = bExt.genIntCast(
-        /*width=*/256, cast<IntegerType>(op.getKey().getType()).isSigned(),
-        adaptor.getKey());
+    bool keySigned = false;
+    if (auto keyTy = dyn_cast<IntegerType>(op.getKey().getType()))
+      keySigned = keyTy.isSigned();
+    else
+      assert(isa<sol::AddressType>(op.getKey().getType()) &&
+             "NYI: Unsupported mapping key type");
+    auto key = bExt.genIntCast(/*width=*/256, keySigned, adaptor.getKey());
     r.create<yul::MStoreOp>(loc, zero, key);
     r.create<yul::MStoreOp>(loc, bExt.genI256Const(0x20), adaptor.getMapping());
 
@@ -1716,6 +1788,11 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
       }
 
       auto ld = evmB.genLoad(addr, dataLoc);
+      if (isa<sol::AddressType>(op.getType())) {
+        APInt mask = APInt::getLowBitsSet(256, 160);
+        r.replaceOpWithNewOp<arith::AndIOp>(op, ld, bExt.genI256Const(mask));
+        return success();
+      }
       if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
         Value castedRes = bExt.genIntCastWithBoolCleanup(
             intTy.getWidth(), intTy.isSigned(), ld, loc);
@@ -1748,6 +1825,10 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
           Value res = r.create<arith::ShLIOp>(loc, shifted,
                                               bExt.genI256Const(256 - numBits));
           r.replaceOp(op, res);
+        } else if (isa<sol::AddressType>(op.getType())) {
+          APInt mask = APInt::getLowBitsSet(256, 160);
+          r.replaceOpWithNewOp<arith::AndIOp>(op, shifted,
+                                              bExt.genI256Const(mask));
         } else if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
           Value castedRes = bExt.genIntCastWithBoolCleanup(
               intTy.getWidth(), intTy.isSigned(), shifted, loc,
@@ -1833,6 +1914,15 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         return success();
       }
 
+      if (isa<sol::AddressType>(op.getVal().getType())) {
+        APInt mask = APInt::getLowBitsSet(256, 160);
+        Value canonicalAddr =
+            r.create<arith::AndIOp>(loc, remappedVal, bExt.genI256Const(mask));
+        evmB.genStore(canonicalAddr, remappedAddr, dataLoc);
+        r.eraseOp(op);
+        return success();
+      }
+
       if (auto intTy = dyn_cast<IntegerType>(op.getVal().getType())) {
         Value castedVal =
             bExt.genIntCast(/*width=*/256, intTy.isSigned(), remappedVal);
@@ -1864,6 +1954,11 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
           numBits = bytesTy.getSize() * 8;
           preparedVal = r.create<arith::ShRUIOp>(
               loc, remappedVal, bExt.genI256Const(256 - numBits));
+        } else if (isa<sol::AddressType>(op.getVal().getType())) {
+          numBits = 160;
+          APInt mask = APInt::getLowBitsSet(256, numBits);
+          preparedVal = r.create<arith::AndIOp>(loc, remappedVal,
+                                                bExt.genI256Const(mask));
         } else if (auto intTy = dyn_cast<IntegerType>(op.getVal().getType())) {
           // In storage packing, bool occupies 1 byte not a single bit.
           numBits = intTy.getWidth() == 1 ? 8 : intTy.getWidth();
@@ -3573,8 +3668,8 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
 void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<ConstantOpLowering, FuncConstantOpLowering,
            DefaultFuncConstantOpLowering>(pats.getContext());
-  pats.add<CastOpLowering, EnumCastOpLowering, BytesCastOpLowering,
-           ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
+  pats.add<CastOpLowering, AddressCastOpLowering, EnumCastOpLowering,
+           BytesCastOpLowering, ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
            ArithBinOpLowering<sol::SubOp, arith::SubIOp>,
            ArithBinOpLowering<sol::MulOp, arith::MulIOp>,
            ArithBinOpLowering<sol::AndOp, arith::AndIOp>,

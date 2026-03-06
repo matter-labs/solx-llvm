@@ -98,6 +98,7 @@ struct ConvertSolToStandardPass
         sol::FuncConstantOp,
         sol::DefaultFuncConstantOp,
         sol::CastOp,
+        sol::AddressCastOp,
         sol::EnumCastOp,
         sol::BytesCastOp,
         sol::AddOp,

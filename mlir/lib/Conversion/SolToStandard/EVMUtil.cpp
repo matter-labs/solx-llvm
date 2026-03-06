@@ -37,7 +37,8 @@ unsigned evm::getAlignment(Value ptr) {
 
 unsigned evm::getCallDataHeadSize(Type ty) {
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
-      isa<sol::BytesType>(ty) || sol::hasDynamicallySizedElt(ty))
+      isa<sol::BytesType>(ty) || isa<sol::AddressType>(ty) ||
+      sol::hasDynamicallySizedElt(ty))
     return 32;
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
@@ -68,7 +69,8 @@ int64_t evm::getMallocSize(Type ty) {
 unsigned evm::getStorageSlotCount(Type ty) {
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
       isa<sol::BytesType>(ty) || isa<sol::MappingType>(ty) ||
-      isa<sol::FuncRefType>(ty) || sol::hasDynamicallySizedElt(ty))
+      isa<sol::FuncRefType>(ty) || isa<sol::AddressType>(ty) ||
+      sol::hasDynamicallySizedElt(ty))
     return 1;
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
@@ -87,7 +89,8 @@ unsigned evm::getStorageSlotCount(Type ty) {
 bool evm::canBePacked(Type ty) {
   // Scalars can be packed within a slot.
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
-      isa<sol::BytesType>(ty) || isa<sol::FuncRefType>(ty))
+      isa<sol::BytesType>(ty) || isa<sol::FuncRefType>(ty) ||
+      isa<sol::AddressType>(ty))
     return true;
 
   // Aggregates are slot-aligned and cannot be packed.
@@ -111,6 +114,10 @@ unsigned evm::getStorageByteSize(Type ty) {
   // Enums can have at most 256 members, so always 1 byte.
   if (isa<sol::EnumType>(ty))
     return 1;
+
+  // Address is 20 bytes.
+  if (isa<sol::AddressType>(ty))
+    return 20;
 
   // Internal function reference.
   if (isa<sol::FuncRefType>(ty))
@@ -164,6 +171,19 @@ Value evm::Builder::normalizeABIScalarForEncoding(
       genRevert(revertCond, loc);
     else
       genPanic(mlir::evm::PanicCode::EnumConversionError, revertCond, loc);
+    return normalized;
+  }
+
+  if (isa<sol::AddressType>(ty)) {
+    Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
+    APInt mask = APInt::getLowBitsSet(256, 160);
+    Value normalized =
+        b.create<arith::AndIOp>(loc, casted, bExt.genI256Const(mask));
+    if (fromCalldata) {
+      Value revertCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                 casted, normalized);
+      genRevert(revertCond, loc);
+    }
     return normalized;
   }
 
@@ -1258,6 +1278,13 @@ Value evm::Builder::genABITupleEncoding(
     return tailAddr;
   }
 
+  // Address type
+  if (isa<sol::AddressType>(ty)) {
+    src = normalizeABIScalarForEncoding(ty, src, loc, srcDataLoc);
+    b.create<yul::MStoreOp>(loc, dstAddr, src);
+    return tailAddr;
+  }
+
   // Bytes type
   if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
     src = normalizeABIScalarForEncoding(bytesTy, src, loc, srcDataLoc);
@@ -1455,6 +1482,15 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
     return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(1));
   }
 
+  // Address type.
+  if (isa<sol::AddressType>(ty)) {
+    Value normalized = normalizeABIScalarForEncoding(ty, val, loc);
+    Value shifted =
+        b.create<arith::ShLIOp>(loc, normalized, bExt.genI256Const(96));
+    b.create<yul::MStoreOp>(loc, addr, shifted);
+    return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(20));
+  }
+
   // Bytes type.
   if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
     Value normalized = normalizeABIScalarForEncoding(bytesTy, val, loc);
@@ -1506,9 +1542,9 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
           Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
           if (!isa<IntegerType>(eltTy) && !isa<sol::EnumType>(eltTy) &&
-              !isa<sol::BytesType>(eltTy))
+              !isa<sol::BytesType>(eltTy) && !isa<sol::AddressType>(eltTy))
             llvm_unreachable(
-                "Only integer, enum, and bytes types can be packed");
+                "Only integer, enum, address, and bytes types can be packed");
 
           srcVal = normalizeABIScalarForEncoding(eltTy, srcVal, loc, dataLoc);
           b.create<yul::MStoreOp>(loc, iDstAddr, srcVal);
@@ -1578,6 +1614,18 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
                                 bExt.genI256Const(enumTy.getMax()));
     genPanic(mlir::evm::PanicCode::EnumConversionError, panicCond, loc);
     return arg;
+  }
+
+  // Address type
+  if (isa<sol::AddressType>(ty)) {
+    Value arg = genLoad(addr);
+    APInt mask = APInt::getLowBitsSet(256, 160);
+    Value maskedArg =
+        b.create<arith::AndIOp>(loc, arg, bExt.genI256Const(mask));
+    auto revertCond =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, arg, maskedArg);
+    genRevert(revertCond, loc);
+    return maskedArg;
   }
 
   // Array type

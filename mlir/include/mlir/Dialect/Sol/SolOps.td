@@ -62,6 +62,17 @@ def Sol_CastOp : Sol_Op<"cast",
   let hasFolder = 1;
 }
 
+def Sol_AddressCastOp : Sol_Op<"address_cast",
+  [Pure, DeclareOpInterfaceMethods<CastOpInterface>]
+>{
+  let arguments =
+      (ins AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_BytesType]>:$inp);
+  let results = (outs AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_BytesType]>:$out);
+
+  let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
+  let hasFolder = 1;
+}
+
 // This operation can panic.
 def Sol_EnumCastOp : Sol_Op<"enum_cast",
   [DeclareOpInterfaceMethods<CastOpInterface>]
@@ -339,7 +350,7 @@ def Sol_LibAddrOp : Sol_Op<"lib_addr", [Pure]> {
   let arguments = (ins StrAttr:$name);
   let results = (outs Sol_AddressType:$val);
 
-  let assemblyFormat = "$name attr-dict `:` type($val)";
+  let assemblyFormat = "$name attr-dict `:` qualified(type($val))";
 }
 
 def Sol_StoreOp : Sol_Op<"store", [
@@ -759,14 +770,14 @@ def CallOp : Sol_Op<"call", [CallOpInterface]> {
 def Sol_ThisOp : Sol_Op<"this"> {
   let results = (outs Sol_AddressType:$addr);
 
-  let assemblyFormat = "attr-dict `:` type($addr)";
+  let assemblyFormat = "attr-dict `:` qualified(type($addr))";
 }
 
 def Sol_CallerOp : Sol_Op<"caller"> {
   let summary = "Returns the caller address";
   let results = (outs Sol_AddressType:$addr);
 
-  let assemblyFormat = "attr-dict `:` type($addr)";
+  let assemblyFormat = "attr-dict `:` qualified(type($addr))";
 }
 
 def Sol_OriginOp : Sol_Op<"origin"> {
@@ -774,7 +785,7 @@ def Sol_OriginOp : Sol_Op<"origin"> {
       "Returns the address of the original transaction sender (tx.origin)";
   let results = (outs Sol_AddressType:$addr);
 
-  let assemblyFormat = "attr-dict `:` type($addr)";
+  let assemblyFormat = "attr-dict `:` qualified(type($addr))";
 }
 
 def Sol_GasPriceOp : Sol_Op<"gasprice"> {
@@ -825,7 +836,7 @@ def Sol_CoinbaseOp : Sol_Op<"coinbase"> {
   let summary = "Returns the current block miner's address (block.coinbase)";
   let results = (outs Sol_AddressType:$addr);
 
-  let assemblyFormat = "attr-dict `:` type($addr)";
+  let assemblyFormat = "attr-dict `:` qualified(type($addr))";
 }
 
 def Sol_DifficultyOp : Sol_Op<"difficulty"> {
@@ -906,7 +917,7 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
 
   let assemblyFormat = [{
     $callee `(` $ins `)` `at` $addr `gas` $gas `value` $val attr-dict `:`
-      functional-type($ins, results)
+      qualified(type($addr)) `,` functional-type($ins, results)
   }];
 }
 
@@ -918,7 +929,7 @@ def Sol_NewOp : Sol_Op<"new", [AttrSizedOperandSegments]> {
 
   let assemblyFormat = [{
     $objName `value` `=` $val (`salt` `=` $salt^)?
-    `ctor` `(` ($ctorArgs^ `:` type($ctorArgs))? `)` attr-dict `:` type($out)
+    `ctor` `(` ($ctorArgs^ `:` type($ctorArgs))? `)` attr-dict `:` qualified(type($out))
   }];
 }
 
@@ -942,7 +953,7 @@ def Sol_CodeOp : Sol_Op<"code"> {
   ];
 
   let assemblyFormat = [{
-    $contAddr attr-dict `:` type($contAddr) `->` type($out)
+    $contAddr attr-dict `:` qualified(type($contAddr)) `->` type($out)
   }];
 }
 
@@ -951,7 +962,7 @@ def Sol_CodeHashOp : Sol_Op<"code_hash", [Pure]> {
   let results = (outs UI256:$out);
 
   let assemblyFormat = [{
-    $contAddr attr-dict `:` type($contAddr) `->` type($out)
+    $contAddr attr-dict `:` qualified(type($contAddr)) `->` type($out)
   }];
 }
 
