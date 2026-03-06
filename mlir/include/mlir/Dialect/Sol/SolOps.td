@@ -732,6 +732,110 @@ def Sol_ThisOp : Sol_Op<"this"> {
   let assemblyFormat = "attr-dict `:` type($addr)";
 }
 
+def Sol_OriginOp : Sol_Op<"origin"> {
+  let summary =
+      "Returns the address of the original transaction sender (tx.origin)";
+  let results = (outs Sol_AddressType:$addr);
+
+  let assemblyFormat = "attr-dict `:` type($addr)";
+}
+
+def Sol_GasPriceOp : Sol_Op<"gasprice"> {
+  let summary =
+      "Returns the gas price of the current transaction (tx.gasprice)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_CallValueOp : Sol_Op<"callvalue"> {
+  let summary =
+      "Returns the amount of wei sent with the current call (msg.value)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_SigOp : Sol_Op<"sig"> {
+  let summary = "Returns the first four bytes of the calldata (msg.sig)";
+  let results = (outs Sol_BytesType:$val);
+
+  let assemblyFormat = "attr-dict `:` qualified(type($val))";
+}
+
+def Sol_BaseFeeOp : Sol_Op<"basefee"> {
+  let summary = "Returns the current block's base fee (block.basefee)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_BlobBaseFeeOp : Sol_Op<"blobbasefee"> {
+  let summary = "Returns the current block's blob base fee (block.blobbasefee)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_ChainIdOp : Sol_Op<"chainid"> {
+  let summary = "Returns the current chain id (block.chainid)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_CoinbaseOp : Sol_Op<"coinbase"> {
+  let summary = "Returns the current block miner's address (block.coinbase)";
+  let results = (outs Sol_AddressType:$addr);
+
+  let assemblyFormat = "attr-dict `:` type($addr)";
+}
+
+def Sol_DifficultyOp : Sol_Op<"difficulty"> {
+  let summary = "Returns the current block difficulty; deprecated alias for "
+                "block.prevrandao";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_GasLimitOp : Sol_Op<"gaslimit"> {
+  let summary = "Returns the current block gas limit (block.gaslimit)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_BlockNumberOp : Sol_Op<"blocknumber"> {
+  let summary = "Returns the current block number (block.number)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_PrevRandaoOp : Sol_Op<"prevrandao"> {
+  let summary = "Returns the random number provided by the beacon chain "
+                "(block.prevrandao)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_TimestampOp : Sol_Op<"timestamp"> {
+  let summary = "Returns the current block timestamp in seconds since Unix "
+                "epoch (block.timestamp)";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
+def Sol_GasLeftOp : Sol_Op<"gasleft"> {
+  let summary = "Returns the remaining gas (gasleft())";
+  let results = (outs UI256:$val);
+
+  let assemblyFormat = "attr-dict `:` type($val)";
+}
+
 def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
   let arguments = (ins StrAttr:$callee, Variadic<AnyType>:$ins,
                        Sol_AddressType:$addr, UI256:$gas, UI256:$val, UnitAttr:$try_call,

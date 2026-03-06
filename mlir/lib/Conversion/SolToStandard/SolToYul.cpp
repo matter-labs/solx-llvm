@@ -2055,6 +2055,142 @@ struct ThisOpLowering : public OpRewritePattern<sol::ThisOp> {
   }
 };
 
+struct OriginOpLowering : public OpRewritePattern<sol::OriginOp> {
+  using OpRewritePattern<sol::OriginOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(sol::OriginOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::OriginOp>(op);
+    return success();
+  }
+};
+
+struct GasPriceOpLowering : public OpRewritePattern<sol::GasPriceOp> {
+  using OpRewritePattern<sol::GasPriceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(sol::GasPriceOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::GasPriceOp>(op);
+    return success();
+  }
+};
+
+struct CallValueOpLowering : public OpRewritePattern<sol::CallValueOp> {
+  using OpRewritePattern<sol::CallValueOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(sol::CallValueOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::CallValOp>(op);
+    return success();
+  }
+};
+
+struct SigOpLowering : public OpConversionPattern<sol::SigOp> {
+  using OpConversionPattern<sol::SigOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::SigOp op, OpAdaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+    Value zero = bExt.genI256Const(0);
+    Value data = r.create<yul::CallDataLoadOp>(loc, zero);
+    // Mask to keep only the top 4 bytes (bytes4 is MSB-aligned).
+    Value mask = bExt.genI256Const(llvm::APInt::getHighBitsSet(256, 32));
+    r.replaceOp(op, r.create<arith::AndIOp>(loc, data, mask));
+    return success();
+  }
+};
+
+struct BaseFeeOpLowering : public OpRewritePattern<sol::BaseFeeOp> {
+  using OpRewritePattern<sol::BaseFeeOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::BaseFeeOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::BaseFeeOp>(op);
+    return success();
+  }
+};
+
+struct BlobBaseFeeOpLowering : public OpRewritePattern<sol::BlobBaseFeeOp> {
+  using OpRewritePattern<sol::BlobBaseFeeOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::BlobBaseFeeOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::BlobBaseFeeOp>(op);
+    return success();
+  }
+};
+
+struct ChainIdOpLowering : public OpRewritePattern<sol::ChainIdOp> {
+  using OpRewritePattern<sol::ChainIdOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::ChainIdOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::ChainIdOp>(op);
+    return success();
+  }
+};
+
+struct CoinbaseOpLowering : public OpRewritePattern<sol::CoinbaseOp> {
+  using OpRewritePattern<sol::CoinbaseOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::CoinbaseOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::CoinBaseOp>(op);
+    return success();
+  }
+};
+
+struct DifficultyOpLowering : public OpRewritePattern<sol::DifficultyOp> {
+  using OpRewritePattern<sol::DifficultyOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::DifficultyOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::PrevrandaoOp>(op);
+    return success();
+  }
+};
+
+struct GasLimitOpLowering : public OpRewritePattern<sol::GasLimitOp> {
+  using OpRewritePattern<sol::GasLimitOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::GasLimitOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::GasLimitOp>(op);
+    return success();
+  }
+};
+
+struct BlockNumberOpLowering : public OpRewritePattern<sol::BlockNumberOp> {
+  using OpRewritePattern<sol::BlockNumberOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::BlockNumberOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::NumberOp>(op);
+    return success();
+  }
+};
+
+struct PrevRandaoOpLowering : public OpRewritePattern<sol::PrevRandaoOp> {
+  using OpRewritePattern<sol::PrevRandaoOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::PrevRandaoOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::PrevrandaoOp>(op);
+    return success();
+  }
+};
+
+struct TimestampOpLowering : public OpRewritePattern<sol::TimestampOp> {
+  using OpRewritePattern<sol::TimestampOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::TimestampOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::TimeStampOp>(op);
+    return success();
+  }
+};
+
+struct GasLeftOpLowering : public OpRewritePattern<sol::GasLeftOp> {
+  using OpRewritePattern<sol::GasLeftOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(sol::GasLeftOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<yul::GasOp>(op);
+    return success();
+  }
+};
+
 struct LibAddrOpLowering : public OpConversionPattern<sol::LibAddrOp> {
   using OpConversionPattern<sol::LibAddrOp>::OpConversionPattern;
 
@@ -3394,9 +3530,14 @@ void evm::populateFuncPats(RewritePatternSet &pats, TypeConverter &tyConv) {
                                                              pats.getContext());
 }
 
-void evm::populateAddrPat(RewritePatternSet &pats) {
-  pats.add<ThisOpLowering, LibAddrOpLowering, CodeHashOpLowering>(
-      pats.getContext());
+void evm::populateAddrPat(RewritePatternSet &pats, TypeConverter &tyConv) {
+  pats.add<ThisOpLowering, OriginOpLowering, GasPriceOpLowering,
+           CallValueOpLowering, BaseFeeOpLowering, BlobBaseFeeOpLowering,
+           ChainIdOpLowering, CoinbaseOpLowering, DifficultyOpLowering,
+           GasLimitOpLowering, BlockNumberOpLowering, PrevRandaoOpLowering,
+           TimestampOpLowering, GasLeftOpLowering, LibAddrOpLowering,
+           CodeHashOpLowering>(pats.getContext());
+  pats.add<SigOpLowering>(tyConv, pats.getContext());
 }
 
 void evm::populateAbiPats(mlir::RewritePatternSet &pats,
@@ -3426,7 +3567,7 @@ void evm::populateStage1Pats(RewritePatternSet &pats, TypeConverter &tyConv) {
   populateCheckedArithPats(pats, tyConv);
   populateCryptoPats(pats, tyConv);
   populateMemPats(pats, tyConv);
-  populateAddrPat(pats);
+  populateAddrPat(pats, tyConv);
   populateAbiPats(pats, tyConv);
   populateExtCallPat(pats, tyConv);
   populateEmitPat(pats, tyConv);

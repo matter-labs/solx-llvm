@@ -46,8 +46,8 @@ void populateEmitPat(RewritePatternSet &pats, TypeConverter &tyConv);
 /// Adds the conversion pattern of sol.require.
 void populateRequirePat(RewritePatternSet &pats);
 
-/// Adds the conversion pattern of sol.this.
-void populateAddrPat(RewritePatternSet &pats);
+/// Adds the conversion patterns for address/block/tx/msg/gas-related ops.
+void populateAddrPat(RewritePatternSet &pats, TypeConverter &tyConv);
 
 /// Adds the conversion patterns of abi ops.
 void populateAbiPats(RewritePatternSet &pats, TypeConverter &tyConv);
