@@ -170,12 +170,20 @@ public:
 
   /// Generates {slot, offset} for packed storage array indexing.
   Value genPackedStorageAddr(Value baseSlot, Value idx, Type eltTy,
+                             bool isDataLeftAligned = false,
                              std::optional<Location> locArg = std::nullopt);
 
   /// Loads slot and punches hole: and(sload(slot), holeMask)
   /// where holeMask = not(ones(numBits) << shiftBits)
   Value genPunchHole(Value slot, Value shiftBits, unsigned numBits,
                      std::optional<Location> locArg = std::nullopt);
+
+  /// Inserts integer value (<=32 bytes) to the slot value:
+  /// or(and(slot, holeMask), shiftedVal), where
+  /// holeMask = not(ones(numBits) << offset * 8),
+  /// shiftedVal = (intVal << offset * 8)
+  Value genInsertIntToSlot(Value slot, Value offset, Value intVal,
+                           unsigned numBits, std::optional<Location> locArg);
 
   /// Generates a load from the low level integral type address.
   Value genLoad(Value addr, sol::DataLocation dataLoc,
@@ -193,12 +201,48 @@ public:
   void genStringStore(std::string const &str, Value addr,
                       std::optional<Location> locArg = std::nullopt);
 
-  /// Generates a loop to copy the data. This works for low level integral type
-  /// addresses.
-  void genCopyLoop(Value srcAddr, Value dstAddr, Value sizeInWords, Type srcTy,
-                   Type dstTy, sol::DataLocation srcDataLoc,
-                   sol::DataLocation dstDataLoc,
-                   std::optional<Location> locArg = std::nullopt);
+  /// Generates length of a string.
+  mlir::Value
+  genStringLength(mlir::Value lengthSlot, mlir::sol::DataLocation dataLoc,
+                  std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Copies a string from storage to memory.
+  void
+  genCopyStringToMemory(mlir::Value srcDataAddr, mlir::Value lengthSlot,
+                        mlir::Value length, mlir::Value dstAddr,
+                        std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Copies a string to the storage.
+  void
+  genCopyStringToStorage(mlir::Value srcDataAddr, mlir::Value lengthSlot,
+                         mlir::Value length, mlir::Value dstAddr,
+                         mlir::sol::DataLocation srcDataLoc,
+                         std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Copies an object of type \p ty from \p srcAddr to \p dstAddr.
+  void genCopy(mlir::Type ty, mlir::Value srcAddr, mlir::Value dstAddr,
+               mlir::sol::DataLocation srcDataLoc,
+               mlir::sol::DataLocation dstDataLoc,
+               std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Generates the 'push' of a value to string.
+  void genPushToString(mlir::Value srcAddr, mlir::Value value,
+                       std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Generates the 'push' of a default value to string and
+  /// returns a fat pointer to the newly added element.
+  Value
+  genPushVoidToString(Value srcAddr,
+                      std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Generates the 'pop' for string.
+  void genPopString(mlir::Value srcAddr, mlir::Value oldData,
+                    mlir::Value length,
+                    std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Generates {slot, offset} for string storage indexing.
+  Value genStringItemAddress(mlir::Value srcAddr, mlir::Value idx,
+                             std::optional<Location> locArg = std::nullopt);
 
   /// Generates an assertion that the tuple size should be less than `size`.
   void genABITupleSizeAssert(TypeRange tys, Value size,

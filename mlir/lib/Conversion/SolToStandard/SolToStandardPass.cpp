@@ -128,6 +128,7 @@ struct ConvertSolToStandardPass
         sol::ArrayLitOp,
         sol::GetCallDataOp,
         sol::PushOp,
+        sol::PushStringOp,
         sol::PopOp,
         sol::AddrOfOp,
         sol::GepOp,

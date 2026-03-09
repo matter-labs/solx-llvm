@@ -161,6 +161,18 @@ public:
         loc, add, genI256Const(~(llvm::APInt(/*numBits=*/256, multiple - 1))));
   }
 
+  /// Generates the ceiling of value / multiple (power-of-2).
+  template <unsigned multiple>
+  mlir::Value
+  genCeilDivision(mlir::Value val,
+                  std::optional<mlir::Location> locArg = std::nullopt) {
+    static_assert(llvm::isPowerOf2_32(multiple));
+    mlir::Location loc = locArg ? *locArg : defLoc;
+    auto add =
+        b.create<mlir::arith::AddIOp>(loc, val, genI256Const(multiple - 1));
+    return b.create<mlir::arith::DivUIOp>(loc, add, genI256Const(multiple));
+  }
+
   /// Returns an existing or a new (if not found) FuncOp in the ModuleOp `mod`.
   sol::FuncOp getOrInsertFuncOp(StringRef name, FunctionType fnTy,
                                 LLVM::Linkage linkage, ModuleOp mod,

@@ -1217,6 +1217,12 @@ struct PushOpLowering : public OpConversionPattern<sol::PushOp> {
     evm::Builder evmB(r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
+    Type inpTy = op.getInp().getType();
+    if (isa<sol::StringType>(inpTy)) {
+      r.replaceOp(op, evmB.genPushVoidToString(adaptor.getInp(), loc));
+      return success();
+    }
+
     Value slot = adaptor.getInp();
     Value oldSize = r.create<yul::SLoadOp>(loc, slot);
     Value newSize = r.create<arith::AddIOp>(loc, oldSize, bExt.genI256Const(1));
@@ -1224,13 +1230,9 @@ struct PushOpLowering : public OpConversionPattern<sol::PushOp> {
     Value dataSlot = evmB.genDataAddrPtr(slot, sol::DataLocation::Storage);
 
     // Get element type from the input type.
-    Type inpTy = op.getInp().getType();
     Type eltTy;
     if (auto arrTy = dyn_cast<sol::ArrayType>(inpTy)) {
       eltTy = arrTy.getEltType();
-    } else if (isa<sol::StringType>(inpTy)) {
-      // bytes.push() returns pointer to uint8
-      eltTy = r.getI8Type();
     } else {
       llvm_unreachable("");
     }
@@ -1247,6 +1249,33 @@ struct PushOpLowering : public OpConversionPattern<sol::PushOp> {
   }
 };
 
+struct PushStringOpLowering : public OpConversionPattern<sol::PushStringOp> {
+  using OpConversionPattern<sol::PushStringOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::PushStringOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+    evm::Builder evmB(r, loc);
+
+    Type inpValueTy = op.getValue().getType();
+    Value castedVal =
+        bExt.genIntCast(256, /*isSigned*/ false, adaptor.getValue());
+
+    // Solc clears the most significant bytes using and 0xff, however LLVM DAG
+    // legalization handles this automatically when legalizing zext i8 to i256.
+    Value byte =
+        isa<sol::BytesType>(inpValueTy)
+            ? r.create<arith::ShRUIOp>(loc, castedVal, bExt.genI256Const(248))
+                  .getResult()
+            : castedVal;
+    evmB.genPushToString(adaptor.getAddr(), byte, loc);
+    r.eraseOp(op);
+
+    return success();
+  }
+};
+
 struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
   using OpConversionPattern<sol::PopOp>::OpConversionPattern;
 
@@ -1256,25 +1285,33 @@ struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
     evm::Builder evmB(r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
+    Type inpTy = op.getInp().getType();
     Value slot = adaptor.getInp();
-    Value oldSize = r.create<yul::SLoadOp>(loc, slot);
+    Value data = evmB.genLoad(slot, sol::DataLocation::Storage, loc);
+    Value oldSize =
+        isa<sol::StringType>(inpTy)
+            ? evmB.genStringLength(data, sol::DataLocation::Storage, loc)
+            : data;
 
     // Generate the empty array panic check.
     Value panicCond = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
                                               oldSize, bExt.genI256Const(0));
     evmB.genPanic(mlir::evm::PanicCode::EmptyArrayPop, panicCond);
 
+    if (isa<sol::StringType>(inpTy)) {
+      evmB.genPopString(slot, data, oldSize, loc);
+      r.eraseOp(op);
+      return success();
+    }
+
     Value newSize = r.create<arith::SubIOp>(loc, oldSize, bExt.genI256Const(1));
     r.create<yul::SStoreOp>(loc, slot, newSize);
     Value dataSlot = evmB.genDataAddrPtr(slot, sol::DataLocation::Storage);
 
     // Get element type from the input type.
-    Type inpTy = op.getInp().getType();
     Type eltTy;
     if (auto arrTy = dyn_cast<sol::ArrayType>(inpTy)) {
       eltTy = arrTy.getEltType();
-    } else if (isa<sol::StringType>(inpTy)) {
-      eltTy = IntegerType::get(r.getContext(), 8);
     } else {
       llvm_unreachable("");
     }
@@ -1446,6 +1483,8 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
                                         bExt.genI256Const(slotOffset));
         }
 
+      } else if (isa<sol::StringType>(baseAddrTy)) {
+        res = evmB.genStringItemAddress(remappedBaseAddr, idx, loc);
       } else {
         llvm_unreachable("NYI");
       }
@@ -1878,29 +1917,36 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
     sol::DataLocation srcDataLoc = sol::getDataLocation(srcTy);
     sol::DataLocation dstDataLoc = sol::getDataLocation(dstTy);
 
-    mlir::Value resAddr;
-    // From storage to memory.
-    if (srcDataLoc == sol::DataLocation::Storage &&
-        dstDataLoc == sol::DataLocation::Memory) {
+    if (dstDataLoc == sol::DataLocation::Memory) {
       // String type
       if (isa<sol::StringType>(srcTy)) {
-        auto dataSlot = evmB.genDataAddrPtr(adaptor.getInp(), srcDataLoc);
+        if (srcDataLoc == sol::DataLocation::CallData) {
+          Value sizeInBytes = evmB.genDynSize(adaptor.getInp(), srcTy);
+          Value memAddr = evmB.genMemAllocForDynArray(
+              sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
+          Value srcDataAddr =
+              evmB.genDataAddrPtr(adaptor.getInp(), srcDataLoc, loc);
+          Value dstDataAddr = evmB.genDataAddrPtr(memAddr, dstDataLoc, loc);
 
-        // Generate the memory allocation.
-        auto sizeInBytes = evmB.genLoad(adaptor.getInp(), srcDataLoc);
-        Value memAddr = evmB.genMemAllocForDynArray(
-            sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
-        resAddr = memAddr;
+          r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
+                                        sizeInBytes);
+          r.replaceOp(op, memAddr);
+          return success();
+        }
+        if (srcDataLoc == sol::DataLocation::Storage) {
+          // Generate the memory allocation.
+          Value sizeSlot = evmB.genLoad(adaptor.getInp(), srcDataLoc, loc);
+          Value sizeInBytes = evmB.genStringLength(sizeSlot, srcDataLoc, loc);
+          Value dstAddr = evmB.genMemAllocForDynArray(
+              sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
 
-        // Generate the loop to copy the data.
-        auto dataMemAddr =
-            r.create<arith::AddIOp>(loc, memAddr, bExt.genI256Const(32));
-        auto sizeInWords = bExt.genRoundUpToMultiple<32>(sizeInBytes);
-        evmB.genCopyLoop(dataSlot, dataMemAddr, sizeInWords, srcTy, dstTy,
-                         srcDataLoc, dstDataLoc);
-
-        r.replaceOp(op, memAddr);
-        return success();
+          Value srcDataPtr =
+              evmB.genDataAddrPtr(adaptor.getInp(), srcDataLoc, loc);
+          evmB.genCopyStringToMemory(srcDataPtr, sizeSlot, sizeInBytes, dstAddr,
+                                     loc);
+          r.replaceOp(op, dstAddr);
+          return success();
+        }
       }
 
       if (isa<sol::ArrayType>(srcTy)) {
@@ -1909,27 +1955,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
       }
     }
 
-    // From calldata to memory.
-    if (srcDataLoc == sol::DataLocation::CallData &&
-        dstDataLoc == sol::DataLocation::Memory) {
-      // String/bytes type.
-      if (isa<sol::StringType>(srcTy)) {
-        Value sizeInBytes = evmB.genDynSize(adaptor.getInp(), srcTy);
-        Value memAddr = evmB.genMemAllocForDynArray(
-            sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
-        Value srcDataAddr = evmB.genDataAddrPtr(adaptor.getInp(), srcTy);
-        Value dstDataAddr =
-            r.create<arith::AddIOp>(loc, memAddr, bExt.genI256Const(32));
-
-        r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
-                                      sizeInBytes);
-        r.replaceOp(op, memAddr);
-        return success();
-      }
-    }
-
     llvm_unreachable("NYI");
-    return failure();
   }
 };
 
@@ -2020,26 +2046,9 @@ struct CopyOpLowering : public OpConversionPattern<sol::CopyOp> {
     Type dstTy = op.getDst().getType();
     sol::DataLocation srcDataLoc = sol::getDataLocation(srcTy);
     sol::DataLocation dstDataLoc = sol::getDataLocation(dstTy);
-    assert(srcDataLoc == sol::DataLocation::Memory &&
-           dstDataLoc == sol::DataLocation::Storage && "NYI");
 
-    if (isa<sol::StringType>(srcTy)) {
-      assert(isa<sol::StringType>(dstTy));
-
-      // Generate the size update.
-      Value srcSize = evmB.genLoad(adaptor.getSrc(), srcDataLoc);
-      evmB.genStore(srcSize, adaptor.getDst(), dstDataLoc);
-
-      // Generate the copy loop.
-      Value srcDataAddr = evmB.genDataAddrPtr(adaptor.getSrc(), srcDataLoc);
-      Value dstDataAddr = evmB.genDataAddrPtr(adaptor.getDst(), dstDataLoc);
-      Value sizeInWords = bExt.genRoundUpToMultiple<32>(srcSize);
-      evmB.genCopyLoop(srcDataAddr, dstDataAddr, sizeInWords, srcTy, dstTy,
-                       srcDataLoc, dstDataLoc);
-    } else {
-      llvm_unreachable("NYI");
-    }
-
+    evmB.genCopy(srcTy, adaptor.getSrc(), adaptor.getDst(), srcDataLoc,
+                 dstDataLoc, loc);
     r.eraseOp(op);
     return success();
   }
@@ -3516,7 +3525,8 @@ void evm::populateMemPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            GetCallDataOpLowering, PushOpLowering, PopOpLowering, GepOpLowering,
            MapOpLowering, LoadOpLowering, LoadImmutableOpLowering,
            StoreOpLowering, DataLocCastOpLowering, LengthOpLowering,
-           SliceOpLowering, CopyOpLowering>(tyConv, pats.getContext());
+           SliceOpLowering, CopyOpLowering, PushStringOpLowering>(
+      tyConv, pats.getContext());
   pats.add<AddrOfOpLowering>(pats.getContext());
 }
 

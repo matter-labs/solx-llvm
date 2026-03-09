@@ -207,6 +207,36 @@ def Sol_PushOp : Sol_Op<"push"> {
   let assemblyFormat = "$inp attr-dict `:` type($inp) `->` type($addr)";
 }
 
+// String push operations are separate from Sol_PushOp because Solidity strings
+// use a dual storage encoding that requires special handling:
+//
+//   - Short strings (< 32 bytes): data and length are packed into a single
+//     storage slot ("in-place" encoding).
+//   - Long strings (>= 32 bytes): the slot holds `length * 2 + 1` and the
+//     byte data is stored starting at keccak256(slot) ("out-of-place"
+//     encoding).
+//
+// Appending a byte may trigger a transition from in-place to out-of-place
+// encoding at the 31-byte boundary, which generic Sol_PushOp does not handle.
+//
+// The two ops correspond to Solidity's two push() overloads on dynamic byte
+// arrays:
+//   - Sol_PushStringOp    : str.push(x) -- appends a specific byte value.
+//   - Sol_PushOp          : str.push()  -- appends a zero byte and returns a
+//     storage reference ({slot, offset}) to the new element so the caller can
+//     write to it later.
+// We have two separate operations because implementing push(x) as push() = x
+// would introduce significant gas overhead. Storage would need to be read and
+// written twice: first when updating the length of the packed string
+// (inside push()), and again when inserting the new value.
+//
+def Sol_PushStringOp : Sol_Op<"push_string"> {
+  let arguments = (ins Sol_StringType:$addr,
+      AnyTypeOf<[Sol_BytesType, Sol_Int]>:$value);
+  let assemblyFormat =
+      "$addr `,` $value attr-dict `:` type($addr) `,` type($value)";
+}
+
 def Sol_PopOp : Sol_Op<"pop"> {
   let arguments = (ins AnyType:$inp);
   let assemblyFormat = "$inp attr-dict `:` type($inp)";
