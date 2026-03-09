@@ -88,8 +88,9 @@ evm::SolTypeConverter::SolTypeConverter() {
     case sol::DataLocation::Memory:
       return i256Ty;
 
-    // Map to storage slot.
+    // Map to storage/transient slot.
     case sol::DataLocation::Storage:
+    case sol::DataLocation::Transient:
       return i256Ty;
 
     default:
@@ -113,8 +114,9 @@ evm::SolTypeConverter::SolTypeConverter() {
     case sol::DataLocation::Memory:
       return i256Ty;
 
-    // Map to storage slot.
+    // Map to storage/transient slot.
     case sol::DataLocation::Storage:
+    case sol::DataLocation::Transient:
       return i256Ty;
 
     default:
@@ -141,8 +143,9 @@ evm::SolTypeConverter::SolTypeConverter() {
     case sol::DataLocation::Memory:
       return i256Ty;
 
-    // Map to storage slot.
+    // Map to storage/transient slot.
     case sol::DataLocation::Storage:
+    case sol::DataLocation::Transient:
       return i256Ty;
 
     default:
@@ -169,6 +172,7 @@ evm::SolTypeConverter::SolTypeConverter() {
     // Map to fat pointer {slot, offset} for packable types, just slot
     // otherwise.
     case sol::DataLocation::Storage:
+    case sol::DataLocation::Transient:
       if (evm::canBePacked(ty.getPointeeType()))
         return LLVM::LLVMStructType::getLiteral(ty.getContext(),
                                                 {i256Ty, i256Ty});

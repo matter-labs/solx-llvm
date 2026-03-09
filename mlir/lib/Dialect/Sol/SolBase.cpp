@@ -138,6 +138,8 @@ mlir::SideEffects::Resource *mlir::sol::getResource(DataLocation dataLoc) {
     return MemoryResource::get();
   case DataLocation::Storage:
     return StorageResource::get();
+  case DataLocation::Transient:
+    return TransientResource::get();
   case DataLocation::Immutable:
     return ImmutableResource::get();
   }

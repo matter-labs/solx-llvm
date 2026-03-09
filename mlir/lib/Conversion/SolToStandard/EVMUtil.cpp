@@ -549,15 +549,20 @@ static Value genPunchHoleInValue(OpBuilder &b, Value value, Value shiftBits,
   Value holeMask = b.create<arith::XOrIOp>(
       loc, shiftedOnes, bExt.genI256Const(APInt::getAllOnes(256)));
 
-  // and(sload(slot), holeMask)
+  // and(value, holeMask)
   return b.create<arith::AndIOp>(loc, value, holeMask);
 }
 
 Value evm::Builder::genPunchHole(Value slot, Value shiftBits, unsigned numBits,
+                                 sol::DataLocation dataLoc,
                                  std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
 
-  Value slotVal = b.create<yul::SLoadOp>(loc, slot);
+  Value slotVal;
+  if (dataLoc == sol::DataLocation::Transient)
+    slotVal = b.create<yul::TLoadOp>(loc, slot);
+  else
+    slotVal = b.create<yul::SLoadOp>(loc, slot);
   return genPunchHoleInValue(b, slotVal, shiftBits, numBits, loc);
 }
 
@@ -575,6 +580,9 @@ Value evm::Builder::genLoad(Value addr, sol::DataLocation dataLoc,
   if (dataLoc == sol::DataLocation::Storage)
     return b.create<yul::SLoadOp>(loc, addr);
 
+  if (dataLoc == sol::DataLocation::Transient)
+    return b.create<yul::TLoadOp>(loc, addr);
+
   llvm_unreachable("NYI");
 }
 
@@ -587,6 +595,8 @@ void evm::Builder::genStore(Value val, Value addr, sol::DataLocation dataLoc,
     b.create<yul::MStoreOp>(loc, addr, val);
   } else if (dataLoc == sol::DataLocation::Storage) {
     b.create<yul::SStoreOp>(loc, addr, val);
+  } else if (dataLoc == sol::DataLocation::Transient) {
+    b.create<yul::TStoreOp>(loc, addr, val);
   } else {
     llvm_unreachable("NYI");
   }

@@ -1802,9 +1802,17 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
       r.replaceOp(op, ld);
       return success();
     }
-    case sol::DataLocation::Storage: {
+    case sol::DataLocation::Storage:
+    case sol::DataLocation::Transient: {
       Type eltTy =
           cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
+
+      // Helper to emit sload or tload based on data location.
+      auto genSlotLoad = [&](Value slot) -> Value {
+        if (dataLoc == sol::DataLocation::Transient)
+          return r.create<yul::TLoadOp>(loc, slot);
+        return r.create<yul::SLoadOp>(loc, slot);
+      };
 
       if (evm::canBePacked(eltTy)) {
         // addr is {slot, offset} struct
@@ -1814,7 +1822,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
             loc, i256Ty, addr, r.getDenseI64ArrayAttr({1}));
 
         // Load the full slot and shift right by (offset * 8) to extract.
-        Value slotVal = r.create<yul::SLoadOp>(loc, slot);
+        Value slotVal = genSlotLoad(slot);
         Value shiftBits =
             r.create<arith::MulIOp>(loc, offset, bExt.genI256Const(8));
         Value shifted = r.create<arith::ShRUIOp>(loc, slotVal, shiftBits);
@@ -1840,12 +1848,18 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
           Value masked =
               r.create<arith::AndIOp>(loc, shifted, bExt.genI256Const(mask));
           r.replaceOp(op, masked);
+        } else if (isa<sol::EnumType>(eltTy)) {
+          // Enums are 1 byte, mask to lower 8 bits.
+          APInt mask = APInt::getLowBitsSet(256, 8);
+          Value masked =
+              r.create<arith::AndIOp>(loc, shifted, bExt.genI256Const(mask));
+          r.replaceOp(op, masked);
         } else {
           llvm_unreachable("NYI");
         }
       } else {
         // addr is just slot
-        Value slotVal = r.create<yul::SLoadOp>(loc, addr);
+        Value slotVal = genSlotLoad(addr);
         r.replaceOp(op, slotVal);
       }
       return success();
@@ -1893,8 +1907,9 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
 
     Value remappedVal = adaptor.getVal();
     Value remappedAddr = adaptor.getAddr();
+    sol::DataLocation dataLoc = sol::getDataLocation(op.getAddr().getType());
 
-    switch (sol::getDataLocation(op.getAddr().getType())) {
+    switch (dataLoc) {
     case sol::DataLocation::Stack:
       r.replaceOpWithNewOp<LLVM::StoreOp>(op, remappedVal, remappedAddr,
                                           evm::getAlignment(remappedAddr));
@@ -1934,10 +1949,19 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
       r.eraseOp(op);
       return success();
     }
-    case sol::DataLocation::Storage: {
+    case sol::DataLocation::Storage:
+    case sol::DataLocation::Transient: {
       Type eltTy =
           cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
       auto i256Ty = r.getIntegerType(256);
+
+      // Helper to create sstore or tstore based on data location.
+      auto genSlotStore = [&](Value slot, Value val) {
+        if (dataLoc == sol::DataLocation::Transient)
+          r.create<yul::TStoreOp>(loc, slot, val);
+        else
+          r.create<yul::SStoreOp>(loc, slot, val);
+      };
 
       if (evm::canBePacked(eltTy)) {
         // addr is {slot, offset} struct
@@ -1946,7 +1970,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         Value offset = r.create<LLVM::ExtractValueOp>(
             loc, i256Ty, remappedAddr, r.getDenseI64ArrayAttr({1}));
 
-        // This tracks the value we prepare to be sstore'd.
+        // This tracks the value we prepare to be stored.
         Value preparedVal;
         unsigned numBits;
         if (auto bytesTy = dyn_cast<sol::BytesType>(eltTy)) {
@@ -1969,6 +1993,11 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
           // FuncRef is 64 bits, already i256.
           numBits = 64;
           preparedVal = remappedVal;
+        } else if (isa<sol::EnumType>(eltTy)) {
+          // Enums can have at most 256 members, so always 1 byte.
+          numBits = 8;
+          preparedVal =
+              bExt.genIntCast(/*width=*/256, /*isSigned=*/false, remappedVal);
         } else {
           llvm_unreachable("NYI");
         }
@@ -1976,18 +2005,20 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         // Punch hole in slot for new value.
         Value shiftBits =
             r.create<arith::MulIOp>(loc, offset, bExt.genI256Const(8));
-        Value slotWithHole = evmB.genPunchHole(slot, shiftBits, numBits);
+        Value slotWithHole =
+            evmB.genPunchHole(slot, shiftBits, numBits, dataLoc);
 
         // Shift new value to position: shl(offset * 8, preparedVal)
         preparedVal = r.create<arith::ShLIOp>(loc, preparedVal, shiftBits);
 
-        // Combine, i.e. or(slotWithHole, preparedVal) and update
-        r.replaceOpWithNewOp<yul::SStoreOp>(
-            op, slot, r.create<arith::OrIOp>(loc, slotWithHole, preparedVal));
+        // Combine, i.e. or(slotWithHole, preparedVal) and store.
+        genSlotStore(slot,
+                     r.create<arith::OrIOp>(loc, slotWithHole, preparedVal));
       } else {
-        // addr is just slot, do direct sstore.
-        r.replaceOpWithNewOp<yul::SStoreOp>(op, remappedAddr, remappedVal);
+        // addr is just slot, do direct store.
+        genSlotStore(remappedAddr, remappedVal);
       }
+      r.eraseOp(op);
       return success();
     }
     default:

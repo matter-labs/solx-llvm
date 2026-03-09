@@ -262,10 +262,12 @@ def Sol_ArrayLitOp : Sol_Op<"array_lit"> {
 
 def Sol_StateVarOp : Sol_Op<"state_var", [Symbol]> {
   let arguments = (ins SymbolNameAttr:$sym_name, TypeAttr:$type,
-                       I256Attr:$slot, I32Attr:$byte_offset);
+                       I256Attr:$slot, I32Attr:$byte_offset,
+                       UnitAttr:$transient);
 
   let assemblyFormat = [{
-    $sym_name `slot` $slot `offset` $byte_offset attr-dict `:` $type
+    $sym_name (`transient` $transient^)? `slot` $slot `offset` $byte_offset
+      attr-dict `:` $type
   }];
 }
 

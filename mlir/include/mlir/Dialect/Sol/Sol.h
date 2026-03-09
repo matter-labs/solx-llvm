@@ -83,6 +83,11 @@ struct StorageResource : public SideEffects::Resource::Base<StorageResource> {
   StringRef getName() final { return "<Storage>"; }
 };
 
+struct TransientResource
+    : public SideEffects::Resource::Base<TransientResource> {
+  StringRef getName() final { return "<Transient>"; }
+};
+
 struct ImmutableResource
     : public SideEffects::Resource::Base<ImmutableResource> {
   StringRef getName() final { return "<Immutable>"; }

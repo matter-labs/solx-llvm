@@ -173,9 +173,10 @@ public:
                              bool isDataLeftAligned = false,
                              std::optional<Location> locArg = std::nullopt);
 
-  /// Loads slot and punches hole: and(sload(slot), holeMask)
+  /// Loads slot and punches hole: and(sload/tload(slot), holeMask)
   /// where holeMask = not(ones(numBits) << shiftBits)
   Value genPunchHole(Value slot, Value shiftBits, unsigned numBits,
+                     sol::DataLocation dataLoc = sol::DataLocation::Storage,
                      std::optional<Location> locArg = std::nullopt);
 
   /// Inserts integer value (<=32 bytes) to the slot value:
