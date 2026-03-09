@@ -1126,7 +1126,8 @@ struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
     for (Region &region : obj->getRegions())
       for (Block &block : region)
         for (Operation &nestedOp : llvm::make_early_inc_range(block))
-          if (isa<sol::FuncOp>(nestedOp) || isa<yul::ObjectOp>(nestedOp))
+          if (isa<sol::FuncOp>(nestedOp) || isa<yul::ObjectOp>(nestedOp) ||
+              isa<LLVM::GlobalOp>(nestedOp))
             nestedOp.moveBefore(modBlk, modBlk->end());
 
     // Terminate all blocks without terminators using the unreachable op.

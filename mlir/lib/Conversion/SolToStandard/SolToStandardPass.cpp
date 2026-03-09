@@ -126,6 +126,7 @@ struct ConvertSolToStandardPass
         sol::AllocaOp,
         sol::MallocOp,
         sol::ArrayLitOp,
+        sol::StringLitOp,
         sol::GetCallDataOp,
         sol::PushOp,
         sol::PushStringOp,
