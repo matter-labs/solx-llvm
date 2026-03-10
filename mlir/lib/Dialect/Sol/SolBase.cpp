@@ -186,6 +186,10 @@ bool mlir::sol::hasDynamicallySizedElt(Type ty) {
   return false;
 }
 
+bool mlir::sol::isAddressLikeType(Type ty) {
+  return isa<AddressType, ContractType>(ty);
+}
+
 static ParseResult parseDataLocation(AsmParser &parser,
                                      DataLocation &dataLocation) {
   StringRef dataLocationTok;

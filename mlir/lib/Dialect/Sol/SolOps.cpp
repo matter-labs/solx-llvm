@@ -98,7 +98,7 @@ bool AddressCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
     return false;
 
   auto isAddressCastTy = [](Type ty) -> bool {
-    if (isa<sol::AddressType>(ty))
+    if (sol::isAddressLikeType(ty))
       return true;
     if (auto intTy = dyn_cast<IntegerType>(ty))
       return intTy.getWidth() == 160 && intTy.isUnsigned();
@@ -108,6 +108,18 @@ bool AddressCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
   };
 
   return isAddressCastTy(inpTy) && isAddressCastTy(outTy);
+}
+
+OpFoldResult ContractCastOp::fold(FoldAdaptor) {
+  if (getType() == getInp().getType())
+    return getInp();
+  return {};
+}
+
+bool ContractCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
+  assert(inputs.size() == 1 && outputs.size() == 1);
+  return isa<sol::ContractType>(inputs.front()) &&
+         isa<sol::ContractType>(outputs.front());
 }
 
 bool EnumCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {

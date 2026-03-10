@@ -59,6 +59,9 @@ Type getEltType(Type ty, Index structTyIdx = 0);
 /// in the lowering.
 bool isRevertStringsEnabled(ModuleOp mod);
 
+/// Return true if the type is address-like (i.e. address or contract type).
+bool isAddressLikeType(Type ty);
+
 ///
 /// The following functions are used to query the capabilities of the specified
 /// evm in the module.

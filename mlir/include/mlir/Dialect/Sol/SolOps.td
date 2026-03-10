@@ -66,8 +66,20 @@ def Sol_AddressCastOp : Sol_Op<"address_cast",
   [Pure, DeclareOpInterfaceMethods<CastOpInterface>]
 >{
   let arguments =
-      (ins AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_BytesType]>:$inp);
-  let results = (outs AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_BytesType]>:$out);
+      (ins AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_ContractType,
+                      Sol_BytesType]>:$inp);
+  let results = (outs AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_ContractType,
+                                 Sol_BytesType]>:$out);
+
+  let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
+  let hasFolder = 1;
+}
+
+def Sol_ContractCastOp : Sol_Op<"contract_cast",
+  [Pure, DeclareOpInterfaceMethods<CastOpInterface>]
+>{
+  let arguments = (ins Sol_ContractType:$inp);
+  let results = (outs Sol_ContractType:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
   let hasFolder = 1;
@@ -157,8 +169,10 @@ def Sol_EcrecoverOp : Sol_Op<"ecrecover"> {
 
 def Sol_CmpOp : Sol_Op<"cmp", [Pure, SameTypeOperands]> {
   let arguments = (ins Sol_CmpPredicateAttr:$predicate,
-                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_BytesType]>:$lhs,
-                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_BytesType]>:$rhs);
+                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType,
+                                  Sol_BytesType]>:$lhs,
+                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType,
+                                  Sol_BytesType]>:$rhs);
   let results = (outs I1:$result);
 
   let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs)";
@@ -771,7 +785,7 @@ def CallOp : Sol_Op<"call", [CallOpInterface]> {
 }
 
 def Sol_ThisOp : Sol_Op<"this"> {
-  let results = (outs Sol_AddressType:$addr);
+  let results = (outs Sol_ContractType:$addr);
 
   let assemblyFormat = "attr-dict `:` qualified(type($addr))";
 }
@@ -928,7 +942,7 @@ def Sol_NewOp : Sol_Op<"new", [AttrSizedOperandSegments]> {
   let arguments = (ins StrAttr:$objName, UI256:$val,
                    Optional<UI256>:$salt,
                    Variadic<AnyType>:$ctorArgs);
-  let results = (outs Sol_AddressType:$out);
+  let results = (outs Sol_ContractType:$out);
 
   let assemblyFormat = [{
     $objName `value` `=` $val (`salt` `=` $salt^)?

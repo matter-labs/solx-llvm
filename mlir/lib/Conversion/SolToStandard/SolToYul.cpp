@@ -166,11 +166,34 @@ struct AddressCastOpLowering : public OpConversionPattern<sol::AddressCastOp> {
       return success();
     }
 
-    // address -> address (payable <-> non-payable).
-    auto inpAddrTy = cast<sol::AddressType>(inpTy);
-    auto outAddrTy = cast<sol::AddressType>(outTy);
-    assert(inpAddrTy.getPayable() != outAddrTy.getPayable() &&
-           "AddressCastOp only supports payable <-> non-payable address casts");
+    if (isa<sol::AddressType>(inpTy) && isa<sol::AddressType>(outTy))
+      // address -> address (payable <-> non-payable)
+      assert(
+          cast<sol::AddressType>(inpTy).getPayable() !=
+              cast<sol::AddressType>(outTy).getPayable() &&
+          "AddressCastOp only supports payable <-> non-payable address casts");
+    else if (!(isa<sol::AddressType>(inpTy) && isa<sol::ContractType>(outTy)) &&
+             !(isa<sol::ContractType>(inpTy) && isa<sol::AddressType>(outTy)))
+      // If not an address <-> contract cast, issue an error.
+      llvm_unreachable("Unexpected types for AddressCastOp");
+
+    // TODO: This is probably not needed, but it is here for Yul parity.
+    Value mask = bExt.genI256Const(APInt::getLowBitsSet(256, 160));
+    r.replaceOpWithNewOp<arith::AndIOp>(op, adaptor.getInp(), mask);
+    return success();
+  }
+};
+
+struct ContractCastOpLowering
+    : public OpConversionPattern<sol::ContractCastOp> {
+  using OpConversionPattern<sol::ContractCastOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ContractCastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    // TODO: This is probably not needed, but it is here for Yul parity.
     Value mask = bExt.genI256Const(APInt::getLowBitsSet(256, 160));
     r.replaceOpWithNewOp<arith::AndIOp>(op, adaptor.getInp(), mask);
     return success();
@@ -1219,7 +1242,7 @@ struct CmpOpLowering : public OpConversionPattern<sol::CmpOp> {
         lhs = r.create<arith::ShRUIOp>(loc, lhs, shiftAmt);
         rhs = r.create<arith::ShRUIOp>(loc, rhs, shiftAmt);
       }
-    } else if (isa<sol::AddressType>(cmpTy)) {
+    } else if (sol::isAddressLikeType(cmpTy)) {
       APInt mask = APInt::getLowBitsSet(256, 160);
       lhs = r.create<arith::AndIOp>(loc, lhs, bExt.genI256Const(mask));
       rhs = r.create<arith::AndIOp>(loc, rhs, bExt.genI256Const(mask));
@@ -1806,7 +1829,7 @@ struct MapOpLowering : public OpConversionPattern<sol::MapOp> {
     if (auto keyTy = dyn_cast<IntegerType>(op.getKey().getType()))
       keySigned = keyTy.isSigned();
     else
-      assert(isa<sol::AddressType>(op.getKey().getType()) &&
+      assert(sol::isAddressLikeType(op.getKey().getType()) &&
              "NYI: Unsupported mapping key type");
     auto key = bExt.genIntCast(/*width=*/256, keySigned, adaptor.getKey());
     r.create<yul::MStoreOp>(loc, zero, key);
@@ -1867,7 +1890,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
       }
 
       auto ld = evmB.genLoad(addr, dataLoc);
-      if (isa<sol::AddressType>(op.getType())) {
+      if (sol::isAddressLikeType(op.getType())) {
         APInt mask = APInt::getLowBitsSet(256, 160);
         r.replaceOpWithNewOp<arith::AndIOp>(op, ld, bExt.genI256Const(mask));
         return success();
@@ -1912,7 +1935,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
           Value res = r.create<arith::ShLIOp>(loc, shifted,
                                               bExt.genI256Const(256 - numBits));
           r.replaceOp(op, res);
-        } else if (isa<sol::AddressType>(op.getType())) {
+        } else if (sol::isAddressLikeType(op.getType())) {
           APInt mask = APInt::getLowBitsSet(256, 160);
           r.replaceOpWithNewOp<arith::AndIOp>(op, shifted,
                                               bExt.genI256Const(mask));
@@ -2008,7 +2031,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         return success();
       }
 
-      if (isa<sol::AddressType>(op.getVal().getType())) {
+      if (sol::isAddressLikeType(op.getVal().getType())) {
         APInt mask = APInt::getLowBitsSet(256, 160);
         Value canonicalAddr =
             r.create<arith::AndIOp>(loc, remappedVal, bExt.genI256Const(mask));
@@ -2057,7 +2080,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
           numBits = bytesTy.getSize() * 8;
           preparedVal = r.create<arith::ShRUIOp>(
               loc, remappedVal, bExt.genI256Const(256 - numBits));
-        } else if (isa<sol::AddressType>(op.getVal().getType())) {
+        } else if (sol::isAddressLikeType(op.getVal().getType())) {
           numBits = 160;
           APInt mask = APInt::getLowBitsSet(256, numBits);
           preparedVal = r.create<arith::AndIOp>(loc, remappedVal,
@@ -3780,8 +3803,9 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
 void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<ConstantOpLowering, FuncConstantOpLowering,
            DefaultFuncConstantOpLowering>(pats.getContext());
-  pats.add<CastOpLowering, AddressCastOpLowering, EnumCastOpLowering,
-           BytesCastOpLowering, ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
+  pats.add<CastOpLowering, AddressCastOpLowering, ContractCastOpLowering,
+           EnumCastOpLowering, BytesCastOpLowering,
+           ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
            ArithBinOpLowering<sol::SubOp, arith::SubIOp>,
            ArithBinOpLowering<sol::MulOp, arith::MulIOp>,
            ArithBinOpLowering<sol::AndOp, arith::AndIOp>,

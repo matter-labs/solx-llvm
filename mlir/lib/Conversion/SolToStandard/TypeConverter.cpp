@@ -49,6 +49,11 @@ evm::SolTypeConverter::SolTypeConverter() {
     return IntegerType::get(ty.getContext(), 256, IntegerType::Signless);
   });
 
+  // Contract type
+  addConversion([&](sol::ContractType ty) -> Type {
+    return IntegerType::get(ty.getContext(), 256, IntegerType::Signless);
+  });
+
   // Function ref type
   addConversion([&](sol::FuncRefType ty) -> Type {
     // Maps to the sol.func id used in the dispatch table generated during the

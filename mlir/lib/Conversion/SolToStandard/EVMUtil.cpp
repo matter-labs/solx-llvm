@@ -37,8 +37,8 @@ unsigned evm::getAlignment(Value ptr) {
 
 unsigned evm::getCallDataHeadSize(Type ty) {
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
-      isa<sol::BytesType>(ty) || isa<sol::AddressType>(ty) ||
-      sol::hasDynamicallySizedElt(ty))
+      isa<sol::BytesType>(ty) || sol::hasDynamicallySizedElt(ty) ||
+      sol::isAddressLikeType(ty))
     return 32;
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
@@ -69,8 +69,8 @@ int64_t evm::getMallocSize(Type ty) {
 unsigned evm::getStorageSlotCount(Type ty) {
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
       isa<sol::BytesType>(ty) || isa<sol::MappingType>(ty) ||
-      isa<sol::FuncRefType>(ty) || isa<sol::AddressType>(ty) ||
-      sol::hasDynamicallySizedElt(ty))
+      isa<sol::FuncRefType>(ty) || sol::hasDynamicallySizedElt(ty) ||
+      sol::isAddressLikeType(ty))
     return 1;
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
@@ -90,7 +90,7 @@ bool evm::canBePacked(Type ty) {
   // Scalars can be packed within a slot.
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
       isa<sol::BytesType>(ty) || isa<sol::FuncRefType>(ty) ||
-      isa<sol::AddressType>(ty))
+      sol::isAddressLikeType(ty))
     return true;
 
   // Aggregates are slot-aligned and cannot be packed.
@@ -115,8 +115,8 @@ unsigned evm::getStorageByteSize(Type ty) {
   if (isa<sol::EnumType>(ty))
     return 1;
 
-  // Address is 20 bytes.
-  if (isa<sol::AddressType>(ty))
+  // Address-like types are 20 bytes.
+  if (sol::isAddressLikeType(ty))
     return 20;
 
   // Internal function reference.
@@ -174,7 +174,7 @@ Value evm::Builder::normalizeABIScalarForEncoding(
     return normalized;
   }
 
-  if (isa<sol::AddressType>(ty)) {
+  if (sol::isAddressLikeType(ty)) {
     Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
     APInt mask = APInt::getLowBitsSet(256, 160);
     Value normalized =
@@ -1297,7 +1297,7 @@ Value evm::Builder::genABITupleEncoding(
   }
 
   // Address type
-  if (isa<sol::AddressType>(ty)) {
+  if (sol::isAddressLikeType(ty)) {
     src = normalizeABIScalarForEncoding(ty, src, loc, srcDataLoc);
     b.create<yul::MStoreOp>(loc, dstAddr, src);
     return tailAddr;
@@ -1501,7 +1501,7 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
   }
 
   // Address type.
-  if (isa<sol::AddressType>(ty)) {
+  if (sol::isAddressLikeType(ty)) {
     Value normalized = normalizeABIScalarForEncoding(ty, val, loc);
     Value shifted =
         b.create<arith::ShLIOp>(loc, normalized, bExt.genI256Const(96));
@@ -1560,9 +1560,9 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
           Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
           if (!isa<IntegerType>(eltTy) && !isa<sol::EnumType>(eltTy) &&
-              !isa<sol::BytesType>(eltTy) && !isa<sol::AddressType>(eltTy))
-            llvm_unreachable(
-                "Only integer, enum, address, and bytes types can be packed");
+              !isa<sol::BytesType>(eltTy) && !sol::isAddressLikeType(eltTy))
+            llvm_unreachable("Only integer, enum, address-like, and bytes "
+                             "types can be packed");
 
           srcVal = normalizeABIScalarForEncoding(eltTy, srcVal, loc, dataLoc);
           b.create<yul::MStoreOp>(loc, iDstAddr, srcVal);
@@ -1635,7 +1635,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
   }
 
   // Address type
-  if (isa<sol::AddressType>(ty)) {
+  if (sol::isAddressLikeType(ty)) {
     Value arg = genLoad(addr);
     APInt mask = APInt::getLowBitsSet(256, 160);
     Value maskedArg =

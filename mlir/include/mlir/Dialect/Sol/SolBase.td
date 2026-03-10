@@ -62,6 +62,12 @@ def Sol_AddressType : Sol_Type<"Address", "address"> {
   let assemblyFormat = [{ (`<` $payable^ `>`)? }];
 }
 
+def Sol_ContractType : Sol_Type<"Contract", "contract"> {
+  let parameters = (ins StringRefParameter<"contract name">:$name,
+                        Sol_PayableKeywordParameter:$payable);
+  let assemblyFormat = [{ `<` $name (`,` $payable^)? `>` }];
+}
+
 def Sol_BytesType : Sol_Type<"Bytes", "bytes"> {
   let parameters = (ins "uint32_t":$size);
   let assemblyFormat = [{ `<` $size `>` }];
