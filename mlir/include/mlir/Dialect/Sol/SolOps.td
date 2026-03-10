@@ -156,8 +156,9 @@ def Sol_EcrecoverOp : Sol_Op<"ecrecover"> {
 }
 
 def Sol_CmpOp : Sol_Op<"cmp", [Pure, SameTypeOperands]> {
-  let arguments = (ins Sol_CmpPredicateAttr:$predicate, Sol_Int:$lhs,
-                       Sol_Int:$rhs);
+  let arguments = (ins Sol_CmpPredicateAttr:$predicate,
+                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_BytesType]>:$lhs,
+                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_BytesType]>:$rhs);
   let results = (outs I1:$result);
 
   let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs)";

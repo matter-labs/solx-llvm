@@ -1202,15 +1202,34 @@ struct CmpOpLowering : public OpConversionPattern<sol::CmpOp> {
 
   LogicalResult matchAndRewrite(sol::CmpOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
-    bool isSigned;
-    if (isa<sol::EnumType>(op.getLhs().getType()))
-      isSigned = false;
-    else
-      isSigned = cast<IntegerType>(op.getLhs().getType()).isSigned();
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    Type cmpTy = op.getLhs().getType();
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    bool isSigned = false;
+
+    if (auto intTy = dyn_cast<IntegerType>(cmpTy)) {
+      isSigned = intTy.isSigned();
+    } else if (auto bytesTy = dyn_cast<sol::BytesType>(cmpTy)) {
+      unsigned cmpWidth = bytesTy.getSize() * 8;
+      if (cmpWidth < 256) {
+        Value shiftAmt = bExt.genI256Const(256 - cmpWidth);
+        lhs = r.create<arith::ShRUIOp>(loc, lhs, shiftAmt);
+        rhs = r.create<arith::ShRUIOp>(loc, rhs, shiftAmt);
+      }
+    } else if (isa<sol::AddressType>(cmpTy)) {
+      APInt mask = APInt::getLowBitsSet(256, 160);
+      lhs = r.create<arith::AndIOp>(loc, lhs, bExt.genI256Const(mask));
+      rhs = r.create<arith::AndIOp>(loc, rhs, bExt.genI256Const(mask));
+    } else if (!isa<sol::EnumType>(cmpTy)) {
+      llvm_unreachable("Unexpected type for comparison");
+    }
+
     arith::CmpIPredicate signlessPred =
         getSignlessPred(op.getPredicate(), isSigned);
-    r.replaceOpWithNewOp<arith::CmpIOp>(op, signlessPred, adaptor.getLhs(),
-                                        adaptor.getRhs());
+    r.replaceOpWithNewOp<arith::CmpIOp>(op, signlessPred, lhs, rhs);
     return success();
   }
 };
