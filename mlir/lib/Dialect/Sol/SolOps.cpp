@@ -83,9 +83,9 @@ bool CastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
          isa<IntegerType>(outputs.front());
 }
 
-OpFoldResult AddressCastOp::fold(FoldAdaptor adaptor) {
+OpFoldResult AddressCastOp::fold(FoldAdaptor) {
   if (getType() == getInp().getType())
-    return adaptor.getInp();
+    return getInp();
   return {};
 }
 
