@@ -207,7 +207,16 @@ public:
   genStringLength(mlir::Value lengthSlot, mlir::sol::DataLocation dataLoc,
                   std::optional<mlir::Location> locArg = std::nullopt);
 
-  /// Copies a string from storage to memory.
+  /// Copies string data from storage into an already-allocated memory data
+  /// area \p dstDataAddr (i.e. the address past the length word). Does not
+  /// write the length word. Use genCopyStringToMemory() to write both the
+  /// data and the length word at a fresh memory allocation.
+  void genCopyStringDataToMemory(
+      mlir::Value srcDataAddr, mlir::Value lengthSlot, mlir::Value length,
+      mlir::Value dstDataAddr,
+      std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Copies a string from storage to memory, including the length word.
   void
   genCopyStringToMemory(mlir::Value srcDataAddr, mlir::Value lengthSlot,
                         mlir::Value length, mlir::Value dstAddr,

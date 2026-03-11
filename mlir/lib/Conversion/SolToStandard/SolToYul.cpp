@@ -1325,6 +1325,66 @@ struct StringLitOpLowering : public OpConversionPattern<sol::StringLitOp> {
   }
 };
 
+struct ConcatOpLowering : public OpConversionPattern<sol::ConcatOp> {
+  using OpConversionPattern<sol::ConcatOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ConcatOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    evm::Builder evmB(r, loc);
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    Value freePtr = evmB.genFreePtr();
+    Value dstStart =
+        r.create<arith::AddIOp>(loc, freePtr, bExt.genI256Const(32));
+
+    Value currDst = dstStart;
+    for (auto [origSrc, src] : llvm::zip(op.getArgs(), adaptor.getArgs())) {
+      Type ty = origSrc.getType();
+      if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+        // bytesN values are left-aligned in an i256 with trailing bytes zeroed
+        // by invariant. On the other hand, solc applies maks on the trailing
+        // bytes. See solx-solidity, #78.
+        r.create<yul::MStoreOp>(loc, currDst, src);
+        Value length = bExt.genI256Const(bytesTy.getSize());
+        currDst = r.create<arith::AddIOp>(loc, currDst, length);
+        continue;
+      }
+
+      assert(isa<sol::StringType>(ty));
+      Value length = nullptr;
+      sol::DataLocation srcDataLoc = sol::getDataLocation(ty);
+      Value srcDataAddr = evmB.genDataAddrPtr(src, srcDataLoc, loc);
+      if (srcDataLoc == sol::DataLocation::Memory) {
+        // srcAddr points to the length word, srcDataAddr = srcAddr + 32.
+        // Use srcAddr so genDynSize reads mload(srcAddr) = the length word.
+        length = evmB.genDynSize(src, ty, loc);
+        r.create<yul::MCopyOp>(loc, currDst, srcDataAddr, length);
+      } else if (srcDataLoc == sol::DataLocation::CallData) {
+        // srcDataAddr is an i256 data pointer. Use srcAddr (fat pointer).
+        length = evmB.genDynSize(src, ty, loc);
+        r.create<yul::CallDataCopyOp>(loc, currDst, srcDataAddr, length);
+      } else {
+        // srcAddr is the storage slot, srcDataAddr = keccak256(srcAddr).
+        // Decode the encoded length from the slot value and copy the raw
+        // data bytes directly into the concat buffer (no length word here).
+        Value lengthSlot = evmB.genLoad(src, srcDataLoc, loc);
+        length = evmB.genStringLength(lengthSlot, srcDataLoc, loc);
+        evmB.genCopyStringDataToMemory(srcDataAddr, lengthSlot, length, currDst,
+                                       loc);
+      }
+      currDst = r.create<arith::AddIOp>(loc, currDst, length);
+    }
+    Value dataSize = r.create<arith::SubIOp>(loc, currDst, dstStart);
+    r.create<yul::MStoreOp>(loc, freePtr, dataSize);
+    Value allocationSize = r.create<arith::SubIOp>(loc, currDst, freePtr);
+    evmB.genFreePtrUpd(freePtr, bExt.genRoundUpToMultiple<32>(allocationSize));
+    r.replaceOp(op, freePtr);
+
+    return success();
+  }
+};
+
 struct GetCallDataOpLowering : public OpConversionPattern<sol::GetCallDataOp> {
   using OpConversionPattern<sol::GetCallDataOp>::OpConversionPattern;
 
@@ -2212,6 +2272,8 @@ struct SliceOpLowering : public OpConversionPattern<sol::SliceOp> {
     unsigned stride = 32;
     if (auto arrType = dyn_cast<sol::ArrayType>(arrTy))
       stride = evm::getCallDataHeadSize(arrType.getEltType());
+    else if (isa<sol::StringType>(arrTy))
+      stride = 1;
 
     // newOffset = dataAddr + start * stride
     Value scaledStart =
@@ -3749,7 +3811,7 @@ void evm::populateMemPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            MapOpLowering, LoadOpLowering, LoadImmutableOpLowering,
            StoreOpLowering, DataLocCastOpLowering, LengthOpLowering,
            SliceOpLowering, CopyOpLowering, PushStringOpLowering,
-           StringLitOpLowering>(tyConv, pats.getContext());
+           StringLitOpLowering, ConcatOpLowering>(tyConv, pats.getContext());
   pats.add<AddrOfOpLowering>(pats.getContext());
 }
 

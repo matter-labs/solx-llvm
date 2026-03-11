@@ -165,6 +165,7 @@ struct ConvertSolToStandardPass
         sol::PrevRandaoOp,
         sol::TimestampOp,
         sol::GasLeftOp,
+        sol::ConcatOp,
         sol::RevertOp,
         sol::EmitOp,
         sol::RequireOp,

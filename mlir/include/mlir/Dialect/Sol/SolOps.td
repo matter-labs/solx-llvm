@@ -1055,4 +1055,13 @@ def Sol_StringLitOp : Sol_Op<"string_lit"> {
   let assemblyFormat = "$value attr-dict `->` qualified(type($addr))";
 }
 
+def Sol_ConcatOp : Sol_Op<"concat"> {
+  let summary = "Concatenate bytes/string values into a new memory string";
+  let arguments =
+      (ins Variadic<AnyTypeOf<[Sol_BytesType, Sol_StringType]>>:$args);
+  let results = (outs Sol_StringType:$result);
+
+  let assemblyFormat = "($args^ `:` type($args))? attr-dict `->` type($result)";
+}
+
 #endif // MLIR_DIALECT_SOL_SOLOPS_TD

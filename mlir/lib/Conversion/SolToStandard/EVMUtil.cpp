@@ -853,9 +853,10 @@ void evm::Builder::genCopyStringToStorage(Value srcDataAddr, Value lengthSlot,
   b.setInsertionPointAfter(ifOutOfPlace);
 }
 
-void evm::Builder::genCopyStringToMemory(Value srcDataAddr, Value lengthSlot,
-                                         Value length, Value dstAddr,
-                                         std::optional<Location> locArg) {
+void evm::Builder::genCopyStringDataToMemory(Value srcDataAddr,
+                                             Value lengthSlot, Value length,
+                                             Value dstDataAddr,
+                                             std::optional<Location> locArg) {
   // See 'genCopyStringToStorage' regarding the storage layout for
   // `bytes` / `string` in Solidity.
 
@@ -867,20 +868,19 @@ void evm::Builder::genCopyStringToMemory(Value srcDataAddr, Value lengthSlot,
   Value isOutOfPlaceEnc = b.create<arith::AndIOp>(loc, lengthSlot, one);
   Value isInPlace = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
                                             isOutOfPlaceEnc, zero);
-  Value dstDataAddr = genDataAddrPtr(dstAddr, sol::DataLocation::Memory, loc);
 
   auto ifInPlace = b.create<scf::IfOp>(loc, isInPlace, true);
-  // In place path
+  // In-place path: the data bytes live in the high 31 bytes of the length slot
+  // itself. Strip the low byte (the length encoding) and write one word.
   b.setInsertionPointToStart(&ifInPlace.getThenRegion().front());
   {
     Value val = b.create<arith::AndIOp>(
         loc, lengthSlot, bExt.genI256Const(~APInt(256, 0xFF), loc));
     b.create<yul::MStoreOp>(loc, dstDataAddr, val);
   }
-  // Out of place path
+  // Out-of-place path: copy 32-byte storage slots to memory word by word.
   b.setInsertionPointToStart(&ifInPlace.getElseRegion().front());
   {
-    // Generate the loop to copy the data.
     b.create<scf::ForOp>(
         loc, /*lowerBound=*/bExt.genIdxConst(0),
         /*upperBound=*/bExt.genCastToIdx(length),
@@ -889,9 +889,9 @@ void evm::Builder::genCopyStringToMemory(Value srcDataAddr, Value lengthSlot,
         /*builder=*/
         [&](OpBuilder &b, Location loc, Value indVar, ValueRange iterArgs) {
           Value i256IndVar = bExt.genCastToI256(indVar);
-          Value storageIdx = b.create<arith::DivUIOp>(
+          Value slotOffset = b.create<arith::DivUIOp>(
               loc, i256IndVar, bExt.genI256Const(32, loc));
-          Value src = b.create<arith::AddIOp>(loc, srcDataAddr, storageIdx);
+          Value src = b.create<arith::AddIOp>(loc, srcDataAddr, slotOffset);
           Value val = b.create<yul::SLoadOp>(loc, src);
           Value dst = b.create<arith::AddIOp>(loc, dstDataAddr, i256IndVar);
           b.create<yul::MStoreOp>(loc, dst, val);
@@ -899,7 +899,15 @@ void evm::Builder::genCopyStringToMemory(Value srcDataAddr, Value lengthSlot,
         });
   }
   b.setInsertionPointAfter(ifInPlace);
+}
 
+void evm::Builder::genCopyStringToMemory(Value srcDataAddr, Value lengthSlot,
+                                         Value length, Value dstAddr,
+                                         std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+
+  Value dstDataAddr = genDataAddrPtr(dstAddr, sol::DataLocation::Memory, loc);
+  genCopyStringDataToMemory(srcDataAddr, lengthSlot, length, dstDataAddr, loc);
   genStore(length, dstAddr, sol::DataLocation::Memory, loc);
 }
 
