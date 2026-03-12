@@ -938,6 +938,49 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
   }];
 }
 
+def Sol_MemoryStringType : Type<
+    CPred<"::llvm::isa<::mlir::sol::StringType>($_self) && "
+          "::llvm::cast<::mlir::sol::StringType>($_self).getDataLocation() == "
+          "::mlir::sol::DataLocation::Memory">,
+    "!sol.string<Memory>">;
+
+def Sol_BareCallOp : Sol_Op<"bare_call"> {
+  let arguments = (ins Sol_AddressType:$addr, UI256:$gas, UI256:$val,
+                       Sol_MemoryStringType:$inp);
+  let results = (outs I1:$status, Sol_MemoryStringType:$ret_data);
+
+  let assemblyFormat = [{
+    $addr `gas` $gas `value` $val `input` $inp attr-dict `:`
+      qualified(type($addr)) `,` type($gas) `,` type($val) `,`
+      qualified(type($inp)) `->` type($status) `,`
+      qualified(type($ret_data))
+  }];
+}
+
+def Sol_BareDelegateCallOp : Sol_Op<"bare_delegate_call"> {
+  let arguments = (ins Sol_AddressType:$addr, UI256:$gas,
+                       Sol_MemoryStringType:$inp);
+  let results = (outs I1:$status, Sol_MemoryStringType:$ret_data);
+
+  let assemblyFormat = [{
+    $addr `gas` $gas `input` $inp attr-dict `:`
+      qualified(type($addr)) `,` type($gas) `,` qualified(type($inp))
+      `->` type($status) `,` qualified(type($ret_data))
+  }];
+}
+
+def Sol_BareStaticCallOp : Sol_Op<"bare_static_call"> {
+  let arguments = (ins Sol_AddressType:$addr, UI256:$gas,
+                       Sol_MemoryStringType:$inp);
+  let results = (outs I1:$status, Sol_MemoryStringType:$ret_data);
+
+  let assemblyFormat = [{
+    $addr `gas` $gas `input` $inp attr-dict `:`
+      qualified(type($addr)) `,` type($gas) `,` qualified(type($inp))
+      `->` type($status) `,` qualified(type($ret_data))
+  }];
+}
+
 def Sol_SendOp : Sol_Op<"send"> {
   let arguments = (ins Sol_AddressType:$addr, UI256:$val);
   let results = (outs I1:$status);
