@@ -990,6 +990,7 @@ struct CMulOpLowering : public OpConversionPattern<sol::CMulOp> {
 
     Value product = r.create<arith::MulIOp>(loc, lhs, rhs);
     auto zero = bExt.genConst(0, ty.getWidth());
+    auto one = bExt.genConst(1, ty.getWidth());
     if (ty.isSigned()) {
       // (Copied from the yul codegen)
       // underflow, if x < 0 and y == int.min
@@ -1002,9 +1003,15 @@ struct CMulOpLowering : public OpConversionPattern<sol::CMulOp> {
                     r.create<arith::AndIOp>(loc, lhsLtZero, rhsEqMin));
 
       // over/underflow, if x != 0 and product/x != y
+      // Use a safe divisor of 1 when lhs == 0 to avoid arith.divsi UB;
+      // the quotient is discarded via the lhsNeqZero guard in that case.
+      // FIXME: It may be reasonable to replace DivSIOp with yul::div.
+      // In this case we could simplify the check, as we can get rid of the
+      // select in this case.
       auto lhsNeqZero =
           r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, lhs, zero);
-      auto quotient = r.create<arith::DivSIOp>(loc, product, lhs);
+      auto safeLhs = r.create<arith::SelectOp>(loc, lhsNeqZero, lhs, one);
+      auto quotient = r.create<arith::DivSIOp>(loc, product, safeLhs);
       auto quotientNeqRhs =
           r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotient, rhs);
       evmB.genPanic(mlir::evm::PanicCode::UnderOverflow,
@@ -1013,9 +1020,12 @@ struct CMulOpLowering : public OpConversionPattern<sol::CMulOp> {
       // Unsigned case
     } else {
       // over/underflow, if x != 0 and product/x != y
+      // Use a safe divisor of 1 when lhs == 0 to avoid arith.divui UB;
+      // the quotient is discarded via the lhsNeqZero guard in that case.
       auto lhsNeqZero =
           r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, lhs, zero);
-      auto quotient = r.create<arith::DivUIOp>(loc, product, lhs);
+      auto safeLhs = r.create<arith::SelectOp>(loc, lhsNeqZero, lhs, one);
+      auto quotient = r.create<arith::DivUIOp>(loc, product, safeLhs);
       auto quotientNeqRhs =
           r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, quotient, rhs);
       evmB.genPanic(mlir::evm::PanicCode::UnderOverflow,
