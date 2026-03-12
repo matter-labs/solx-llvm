@@ -2913,12 +2913,19 @@ struct NewOpLowering : public OpConversionPattern<sol::NewOp> {
         op.getCtorArgs().getType(), adaptor.getCtorArgs(), tupleStart);
     Value allocSize = r.create<arith::SubIOp>(loc, tupleEnd, bytecodeAddr);
 
+    Value status;
     if (op.getSalt())
-      r.replaceOpWithNewOp<yul::Create2Op>(op, adaptor.getVal(), bytecodeAddr,
-                                           allocSize, adaptor.getSalt());
+      status = r.create<yul::Create2Op>(loc, adaptor.getVal(), bytecodeAddr,
+                                        allocSize, adaptor.getSalt());
     else
-      r.replaceOpWithNewOp<yul::CreateOp>(op, adaptor.getVal(), bytecodeAddr,
-                                          allocSize);
+      status = r.create<yul::CreateOp>(loc, adaptor.getVal(), bytecodeAddr,
+                                       allocSize);
+
+    Value zero = bExt.genI256Const(0);
+    Value statusIsZero =
+        r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, status, zero);
+    evmB.genForwardingRevert(statusIsZero);
+    r.replaceOp(op, status);
     return success();
   }
 };
