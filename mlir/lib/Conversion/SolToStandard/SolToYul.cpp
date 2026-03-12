@@ -21,6 +21,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
@@ -2760,6 +2761,90 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
   }
 };
 
+template <typename OpT, typename AdaptorT, typename OpBuilderFuncT>
+static LogicalResult lowerBareCallLikeOp(OpT op, AdaptorT adaptor,
+                                         ConversionPatternRewriter &r,
+                                         OpBuilderFuncT &&opBuilderFunc) {
+  Location loc = op.getLoc();
+  mlir::solgen::BuilderExt bExt(r, loc);
+  evm::Builder evmB(r, loc);
+
+  auto mod = op->template getParentOfType<ModuleOp>();
+  assert(sol::evmSupportsReturnData(mod) && "NYI");
+
+  auto inpTy = cast<sol::StringType>(op.getInp().getType());
+  Value inpSize = evmB.genDynSize(adaptor.getInp(), inpTy, loc);
+  Value inpStart = evmB.genDataAddrPtr(adaptor.getInp(), inpTy, loc);
+  Value zero = bExt.genI256Const(0);
+  Value rawStatus = opBuilderFunc(loc, adaptor, inpStart, inpSize, zero, r);
+
+  Value status = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                         rawStatus, bExt.genI256Const(0));
+  Value retDataSize = r.create<yul::ReturnDataSizeOp>(loc);
+  Value retData = evmB.genMemAllocForDynArray(
+      retDataSize, bExt.genRoundUpToMultiple<32>(retDataSize), loc);
+  Value retDataStart =
+      evmB.genDataAddrPtr(retData, sol::DataLocation::Memory, loc);
+  r.create<yul::ReturnDataCopyOp>(loc, /*dst=*/retDataStart,
+                                  /*src=*/bExt.genI256Const(0), retDataSize);
+
+  r.replaceOp(op, SmallVector<Value, 2>{status, retData});
+  return success();
+}
+
+struct BareCallOpLowering : public OpConversionPattern<sol::BareCallOp> {
+  using OpConversionPattern<sol::BareCallOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::BareCallOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    return lowerBareCallLikeOp(
+        op, adaptor, r,
+        [](Location loc, auto adaptor, Value inpStart, Value inpSize,
+           Value zero, ConversionPatternRewriter &r) {
+          return r.create<yul::CallOp>(
+              loc, adaptor.getGas(), adaptor.getAddr(), adaptor.getVal(),
+              /*inpOffset=*/inpStart, inpSize, /*outOffset=*/zero,
+              /*outSize=*/zero);
+        });
+  }
+};
+
+struct BareDelegateCallOpLowering
+    : public OpConversionPattern<sol::BareDelegateCallOp> {
+  using OpConversionPattern<sol::BareDelegateCallOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::BareDelegateCallOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    return lowerBareCallLikeOp(
+        op, adaptor, r,
+        [](Location loc, auto adaptor, Value inpStart, Value inpSize,
+           Value zero, ConversionPatternRewriter &r) {
+          return r.create<yul::DelegateCallOp>(
+              loc, adaptor.getGas(), adaptor.getAddr(),
+              /*inpOffset=*/inpStart, inpSize, /*outOffset=*/zero,
+              /*outSize=*/zero);
+        });
+  }
+};
+
+struct BareStaticCallOpLowering
+    : public OpConversionPattern<sol::BareStaticCallOp> {
+  using OpConversionPattern<sol::BareStaticCallOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::BareStaticCallOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    return lowerBareCallLikeOp(
+        op, adaptor, r,
+        [](Location loc, auto adaptor, Value inpStart, Value inpSize,
+           Value zero, ConversionPatternRewriter &r) {
+          return r.create<yul::StaticCallOp>(
+              loc, adaptor.getGas(), adaptor.getAddr(),
+              /*inpOffset=*/inpStart, inpSize, /*outOffset=*/zero,
+              /*outSize=*/zero);
+        });
+  }
+};
+
 /// Lowers the common value-transfer call pattern used by 'sol.send' and
 /// 'sol.transfer' and returns the requested status predicate.
 template <typename AdaptorT>
@@ -3925,9 +4010,10 @@ void evm::populateAbiPats(mlir::RewritePatternSet &pats,
 }
 
 void evm::populateExtCallPat(RewritePatternSet &pats, TypeConverter &tyConv) {
-  pats.add<ExtCallOpLowering, TryOpLowering, NewOpLowering, CodeOpLowering,
-           ObjectCodeOpLowering, SendOpLowering, TransferOpLowering>(
-      tyConv, pats.getContext());
+  pats.add<ExtCallOpLowering, BareCallOpLowering, BareDelegateCallOpLowering,
+           BareStaticCallOpLowering, TryOpLowering, NewOpLowering,
+           CodeOpLowering, ObjectCodeOpLowering, SendOpLowering,
+           TransferOpLowering>(tyConv, pats.getContext());
 }
 
 void evm::populateEmitPat(RewritePatternSet &pats, TypeConverter &tyConv) {
