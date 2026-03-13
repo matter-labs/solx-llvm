@@ -1386,27 +1386,7 @@ struct ConcatOpLowering : public OpConversionPattern<sol::ConcatOp> {
       }
 
       assert(isa<sol::StringType>(ty));
-      Value length = nullptr;
-      sol::DataLocation srcDataLoc = sol::getDataLocation(ty);
-      Value srcDataAddr = evmB.genDataAddrPtr(src, srcDataLoc, loc);
-      if (srcDataLoc == sol::DataLocation::Memory) {
-        // srcAddr points to the length word, srcDataAddr = srcAddr + 32.
-        // Use srcAddr so genDynSize reads mload(srcAddr) = the length word.
-        length = evmB.genDynSize(src, ty, loc);
-        r.create<yul::MCopyOp>(loc, currDst, srcDataAddr, length);
-      } else if (srcDataLoc == sol::DataLocation::CallData) {
-        // srcDataAddr is an i256 data pointer. Use srcAddr (fat pointer).
-        length = evmB.genDynSize(src, ty, loc);
-        r.create<yul::CallDataCopyOp>(loc, currDst, srcDataAddr, length);
-      } else {
-        // srcAddr is the storage slot, srcDataAddr = keccak256(srcAddr).
-        // Decode the encoded length from the slot value and copy the raw
-        // data bytes directly into the concat buffer (no length word here).
-        Value lengthSlot = evmB.genLoad(src, srcDataLoc, loc);
-        length = evmB.genStringLength(lengthSlot, srcDataLoc, loc);
-        evmB.genCopyStringDataToMemory(srcDataAddr, lengthSlot, length, currDst,
-                                       loc);
-      }
+      Value length = evmB.genCopyStringDataToMemory(src, ty, currDst, loc);
       currDst = r.create<arith::AddIOp>(loc, currDst, length);
     }
     Value dataSize = r.create<arith::SubIOp>(loc, currDst, dstStart);
@@ -1518,10 +1498,9 @@ struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
     Type inpTy = op.getInp().getType();
     Value slot = adaptor.getInp();
     Value data = evmB.genLoad(slot, sol::DataLocation::Storage, loc);
-    Value oldSize =
-        isa<sol::StringType>(inpTy)
-            ? evmB.genStringLength(data, sol::DataLocation::Storage, loc)
-            : data;
+    Value oldSize = isa<sol::StringType>(inpTy)
+                        ? evmB.genStorageStringLength(data, loc)
+                        : data;
 
     // Generate the empty array panic check.
     Value panicCond = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
@@ -2223,14 +2202,17 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
         if (srcDataLoc == sol::DataLocation::Storage) {
           // Generate the memory allocation.
           Value sizeSlot = evmB.genLoad(adaptor.getInp(), srcDataLoc, loc);
-          Value sizeInBytes = evmB.genStringLength(sizeSlot, srcDataLoc, loc);
+          Value size = evmB.genStorageStringLength(sizeSlot, loc);
           Value dstAddr = evmB.genMemAllocForDynArray(
-              sizeInBytes, bExt.genRoundUpToMultiple<32>(sizeInBytes));
+              size, bExt.genRoundUpToMultiple<32>(size));
+          Value dstDataAddr =
+              evmB.genDataAddrPtr(dstAddr, sol::DataLocation::Memory, loc);
 
-          Value srcDataPtr =
-              evmB.genDataAddrPtr(adaptor.getInp(), srcDataLoc, loc);
-          evmB.genCopyStringToMemory(srcDataPtr, sizeSlot, sizeInBytes, dstAddr,
-                                     loc);
+          // Store the size.
+          evmB.genStore(size, dstAddr, sol::DataLocation::Memory, loc);
+          evmB.genCopyStringDataFromStorageToMemory(adaptor.getInp(), sizeSlot,
+                                                    size, dstDataAddr, loc);
+
           r.replaceOp(op, dstAddr);
           return success();
         }

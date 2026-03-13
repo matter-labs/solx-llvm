@@ -202,31 +202,33 @@ public:
   void genStringStore(std::string const &str, Value addr,
                       std::optional<Location> locArg = std::nullopt);
 
-  /// Generates length of a string.
+  /// Generates length of a string in storage.
   mlir::Value
-  genStringLength(mlir::Value lengthSlot, mlir::sol::DataLocation dataLoc,
-                  std::optional<mlir::Location> locArg = std::nullopt);
+  genStorageStringLength(mlir::Value lengthSlot,
+                         std::optional<mlir::Location> locArg = std::nullopt);
 
-  /// Copies string data from storage into an already-allocated memory data
-  /// area \p dstDataAddr (i.e. the address past the length word). Does not
-  /// write the length word. Use genCopyStringToMemory() to write both the
-  /// data and the length word at a fresh memory allocation.
-  void genCopyStringDataToMemory(
-      mlir::Value srcDataAddr, mlir::Value lengthSlot, mlir::Value length,
+  /// Low-level helper: copies string data from storage into an
+  /// already-allocated memory area \p dstDataAddr, which is the destination
+  /// for the string's raw bytes. For length-prefixed encodings in memory,
+  /// this is typically the address immediately past the length word. Uses the
+  /// pre-decoded \p lengthSlot and \p length. Does not write the length word.
+  void genCopyStringDataFromStorageToMemory(
+      mlir::Value src, mlir::Value lengthSlot, mlir::Value length,
       mlir::Value dstDataAddr,
       std::optional<mlir::Location> locArg = std::nullopt);
 
-  /// Copies a string from storage to memory, including the length word.
-  void
-  genCopyStringToMemory(mlir::Value srcDataAddr, mlir::Value lengthSlot,
-                        mlir::Value length, mlir::Value dstAddr,
-                        std::optional<mlir::Location> locArg = std::nullopt);
+  /// Copies string data from \p src (any data location encoded in \p ty) into
+  /// the already-allocated memory area \p dstDataAddr (the address past the
+  /// length word). Does not write the length word. Returns the byte length.
+  mlir::Value genCopyStringDataToMemory(
+      mlir::Value src, mlir::Type ty, mlir::Value dstDataAddr,
+      std::optional<mlir::Location> locArg = std::nullopt);
 
-  /// Copies a string to the storage.
+  /// Copies a string from \p src (any data location encoded in \p ty) to the
+  /// storage slot \p dstAddr, handling in-place / out-of-place encoding and
+  /// zeroing storage slots no longer needed by the new value.
   void
-  genCopyStringToStorage(mlir::Value srcDataAddr, mlir::Value lengthSlot,
-                         mlir::Value length, mlir::Value dstAddr,
-                         mlir::sol::DataLocation srcDataLoc,
+  genCopyStringToStorage(mlir::Value src, mlir::Type ty, mlir::Value dstAddr,
                          std::optional<mlir::Location> locArg = std::nullopt);
 
   /// Copies an object of type \p ty from \p srcAddr to \p dstAddr.

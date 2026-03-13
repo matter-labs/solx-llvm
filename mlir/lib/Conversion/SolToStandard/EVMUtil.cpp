@@ -445,8 +445,8 @@ Value evm::Builder::genDynSize(Value addr, Type ty,
                                           b.getDenseI64ArrayAttr({1}));
 
   Value sizeSlot = genLoad(addr, dataLoc, loc);
-  if (isa<sol::StringType>(ty))
-    return genStringLength(sizeSlot, dataLoc, loc);
+  if (isa<sol::StringType>(ty) && dataLoc == sol::DataLocation::Storage)
+    return genStorageStringLength(sizeSlot, loc);
 
   return sizeSlot;
 }
@@ -627,17 +627,10 @@ void evm::Builder::genStringStore(std::string const &str, Value addr,
   }
 }
 
-Value evm::Builder::genStringLength(Value lengthSlot, sol::DataLocation dataLoc,
-                                    std::optional<Location> locArg) {
+Value evm::Builder::genStorageStringLength(Value lengthSlot,
+                                           std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
-
-  if (dataLoc == sol::DataLocation::Memory ||
-      dataLoc == sol::DataLocation::CallData) {
-    return lengthSlot;
-  }
-
-  assert(dataLoc == sol::DataLocation::Storage);
 
   // For the storage we follow YUL's implementation to get length:
   //   length := div(data, 2)
@@ -688,9 +681,7 @@ static Value getI256MSBMaskedValue(OpBuilder &b, Value val, Value maskLen,
   return b.create<mlir::arith::AndIOp>(loc, val, mask);
 }
 
-void evm::Builder::genCopyStringToStorage(Value srcDataAddr, Value lengthSlot,
-                                          Value length, Value dstAddr,
-                                          sol::DataLocation srcDataLoc,
+void evm::Builder::genCopyStringToStorage(Value src, Type ty, Value dstAddr,
                                           std::optional<Location> locArg) {
   // Storage layout for `bytes` / `string` in Solidity:
   //
@@ -718,9 +709,20 @@ void evm::Builder::genCopyStringToStorage(Value srcDataAddr, Value lengthSlot,
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  Value oldLength =
-      genStringLength(genLoad(dstAddr, sol::DataLocation::Storage, loc),
-                      sol::DataLocation::Storage, loc);
+  Value lengthSlot = nullptr;
+  Value length = nullptr;
+  sol::DataLocation srcDataLoc = sol::getDataLocation(ty);
+  if (srcDataLoc == sol::DataLocation::CallData ||
+      srcDataLoc == sol::DataLocation::Memory) {
+    length = genDynSize(src, ty, loc);
+  } else {
+    assert(srcDataLoc == sol::DataLocation::Storage);
+    lengthSlot = genLoad(src, srcDataLoc, loc);
+    length = genStorageStringLength(lengthSlot, loc);
+  }
+
+  Value oldLength = genStorageStringLength(
+      genLoad(dstAddr, sol::DataLocation::Storage, loc), loc);
   // Remove the old string data by zeroing storage slots that are no longer
   // part of the new value. We do this if the old string has length > 31 bytes.
   {
@@ -764,6 +766,7 @@ void evm::Builder::genCopyStringToStorage(Value srcDataAddr, Value lengthSlot,
   b.setInsertionPointToStart(&ifOutOfPlace.getThenRegion().front());
 
   Value dstDataArea = genDataAddrPtr(dstAddr, sol::DataLocation::Storage, loc);
+  Value srcDataAddr = genDataAddrPtr(src, srcDataLoc, loc);
   Value loopEnd = b.create<mlir::arith::AndIOp>(
       loc, length, bExt.genI256Const(~APInt(256, 0x1F), loc));
 
@@ -836,9 +839,10 @@ void evm::Builder::genCopyStringToStorage(Value srcDataAddr, Value lengthSlot,
     // byte. For non-storage sources we load the raw data word directly.
     // isNotEmptyCond above ensures length > 0, satisfying the maskLen > 0
     // precondition of getI256MSBMaskedValue.
-    Value val = srcDataLoc == sol::DataLocation::Storage
-                    ? lengthSlot
-                    : genLoad(srcDataAddr, srcDataLoc, loc);
+    Value val =
+        srcDataLoc == sol::DataLocation::Storage
+            ? lengthSlot
+            : genLoad(genDataAddrPtr(src, srcDataLoc, loc), srcDataLoc, loc);
     Value maskedVal = getI256MSBMaskedValue(b, val, length, loc);
     Value doubleLength =
         b.create<arith::MulIOp>(loc, length, bExt.genI256Const(2, loc));
@@ -853,10 +857,34 @@ void evm::Builder::genCopyStringToStorage(Value srcDataAddr, Value lengthSlot,
   b.setInsertionPointAfter(ifOutOfPlace);
 }
 
-void evm::Builder::genCopyStringDataToMemory(Value srcDataAddr,
-                                             Value lengthSlot, Value length,
-                                             Value dstDataAddr,
-                                             std::optional<Location> locArg) {
+Value evm::Builder::genCopyStringDataToMemory(Value src, Type ty,
+                                              Value dstDataAddr,
+                                              std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  sol::DataLocation srcDataLoc = sol::getDataLocation(ty);
+  if (srcDataLoc == sol::DataLocation::Storage) {
+    Value lengthSlot = genLoad(src, srcDataLoc, loc);
+    Value length = genStorageStringLength(lengthSlot, loc);
+    genCopyStringDataFromStorageToMemory(src, lengthSlot, length, dstDataAddr,
+                                         loc);
+    return length;
+  }
+
+  Value length = genDynSize(src, ty, loc);
+  Value srcDataAddr = genDataAddrPtr(src, srcDataLoc, loc);
+  if (srcDataLoc == sol::DataLocation::Memory)
+    b.create<yul::MCopyOp>(loc, dstDataAddr, srcDataAddr, length);
+  else if (srcDataLoc == sol::DataLocation::CallData)
+    b.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr, length);
+  else
+    llvm_unreachable("Unexpected data location");
+
+  return length;
+}
+
+void evm::Builder::genCopyStringDataFromStorageToMemory(
+    Value src, Value lengthSlot, Value length, Value dstDataAddr,
+    std::optional<Location> locArg) {
   // See 'genCopyStringToStorage' regarding the storage layout for
   // `bytes` / `string` in Solidity.
 
@@ -881,6 +909,7 @@ void evm::Builder::genCopyStringDataToMemory(Value srcDataAddr,
   // Out-of-place path: copy 32-byte storage slots to memory word by word.
   b.setInsertionPointToStart(&ifInPlace.getElseRegion().front());
   {
+    auto srcDataAddr = genDataAddrPtr(src, sol::DataLocation::Storage, loc);
     b.create<scf::ForOp>(
         loc, /*lowerBound=*/bExt.genIdxConst(0),
         /*upperBound=*/bExt.genCastToIdx(length),
@@ -899,16 +928,6 @@ void evm::Builder::genCopyStringDataToMemory(Value srcDataAddr,
         });
   }
   b.setInsertionPointAfter(ifInPlace);
-}
-
-void evm::Builder::genCopyStringToMemory(Value srcDataAddr, Value lengthSlot,
-                                         Value length, Value dstAddr,
-                                         std::optional<Location> locArg) {
-  Location loc = locArg ? *locArg : defLoc;
-
-  Value dstDataAddr = genDataAddrPtr(dstAddr, sol::DataLocation::Memory, loc);
-  genCopyStringDataToMemory(srcDataAddr, lengthSlot, length, dstDataAddr, loc);
-  genStore(length, dstAddr, sol::DataLocation::Memory, loc);
 }
 
 Value evm::Builder::genInsertIntToSlot(Value slot, Value offset, Value intVal,
@@ -930,7 +949,7 @@ void evm::Builder::genPushToString(Value srcAddr, Value value,
   mlir::solgen::BuilderExt bExt(b, loc);
 
   Value data = genLoad(srcAddr, sol::DataLocation::Storage, loc);
-  Value oldLength = genStringLength(data, sol::DataLocation::Storage, loc);
+  Value oldLength = genStorageStringLength(data, loc);
 
   Value panicCond =
       b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, oldLength,
@@ -1000,7 +1019,7 @@ Value evm::Builder::genPushVoidToString(Value srcAddr,
   mlir::solgen::BuilderExt bExt(b, loc);
 
   Value data = genLoad(srcAddr, sol::DataLocation::Storage, loc);
-  Value oldLength = genStringLength(data, sol::DataLocation::Storage, loc);
+  Value oldLength = genStorageStringLength(data, loc);
 
   Value panicCond =
       b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, oldLength,
@@ -1076,7 +1095,7 @@ Value evm::Builder::genStringItemAddress(Value srcAddr, Value idx,
 
   Type bytes1Ty = mlir::sol::BytesType::get(b.getContext(), /*size*/ 1);
   Value data = genLoad(srcAddr, sol::DataLocation::Storage, loc);
-  Value length = genStringLength(data, sol::DataLocation::Storage, loc);
+  Value length = genStorageStringLength(data, loc);
 
   Value castedIdx = bExt.genIntCast(256, /*isSigned*/ false, idx);
   auto panicCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge,
@@ -1215,41 +1234,13 @@ void evm::Builder::genCopy(Type ty, Value srcAddr, Value dstAddr,
   } else if (isa<IntegerType>(ty)) {
     genStore(genLoad(srcAddr, srcDataLoc, loc), dstAddr, dstDataLoc, loc);
   } else if (isa<sol::StringType>(ty)) {
-    Value srcDataAddr = genDataAddrPtr(srcAddr, srcDataLoc, loc);
     if (dstDataLoc == sol::DataLocation::Storage) {
-      if (srcDataLoc == sol::DataLocation::CallData) {
-        // srcDataAddr is an i256 data pointer extracted from the fat pointer.
-        // Use srcAddr (the fat pointer) to extract the size via genDynSize.
-        Value length = genDynSize(srcAddr, ty, loc);
-        // For CallData, length and lengthSlot are the same.
-        genCopyStringToStorage(srcDataAddr, length, length, dstAddr, srcDataLoc,
-                               loc);
-      } else {
-        Value lengthSlot = genLoad(srcAddr, srcDataLoc, loc);
-        Value length = genStringLength(lengthSlot, srcDataLoc, loc);
-        genCopyStringToStorage(srcDataAddr, lengthSlot, length, dstAddr,
-                               srcDataLoc, loc);
-      }
+      genCopyStringToStorage(srcAddr, ty, dstAddr, loc);
     } else if (dstDataLoc == sol::DataLocation::Memory) {
       Value dstDataAddr = genDataAddrPtr(dstAddr, dstDataLoc, loc);
-      if (srcDataLoc == sol::DataLocation::Memory) {
-        // srcAddr points to the length word, srcDataAddr = srcAddr + 32.
-        // Use srcAddr so genDynSize reads mload(srcAddr) = the length word.
-        Value length = genDynSize(srcAddr, ty, loc);
-        b.create<yul::MCopyOp>(loc, dstDataAddr, srcDataAddr, length);
-        // Write the string length.
-        genStore(length, dstAddr, dstDataLoc, loc);
-      } else if (srcDataLoc == sol::DataLocation::CallData) {
-        // srcDataAddr is an i256 data pointer. Use srcAddr (fat pointer).
-        Value length = genDynSize(srcAddr, ty, loc);
-        b.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr, length);
-        // Write the string length.
-        genStore(length, dstAddr, dstDataLoc, loc);
-      } else {
-        Value lengthSlot = genLoad(srcAddr, srcDataLoc, loc);
-        Value length = genStringLength(lengthSlot, srcDataLoc, loc);
-        genCopyStringToMemory(srcDataAddr, lengthSlot, length, dstAddr, loc);
-      }
+      Value length = genCopyStringDataToMemory(srcAddr, ty, dstDataAddr, loc);
+      // Write the string length.
+      genStore(length, dstAddr, dstDataLoc, loc);
     }
   } else {
     llvm_unreachable("NYI");
@@ -1398,21 +1389,13 @@ Value evm::Builder::genABITupleEncoding(
 
   // String type
   if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
-    // Generate the length field copy.
-    auto size = genDynSize(src, stringTy, loc);
-    b.create<yul::MStoreOp>(loc, tailAddr, size);
-
-    // Generate the data copy.
-    auto dataAddr = genDataAddrPtr(src, stringTy, loc);
     auto tailDataAddr =
         b.create<arith::AddIOp>(loc, tailAddr, bExt.genI256Const(32));
-    if (stringTy.getDataLocation() == sol::DataLocation::Memory)
-      b.create<yul::MCopyOp>(loc, tailDataAddr, dataAddr, size);
-    else if (stringTy.getDataLocation() == sol::DataLocation::CallData)
-      b.create<yul::CallDataCopyOp>(loc, tailDataAddr, dataAddr, size);
-    else
-      llvm_unreachable("NYI");
 
+    // Generate the data copy.
+    Value size = genCopyStringDataToMemory(src, ty, tailDataAddr, loc);
+    // Generate the length field copy.
+    b.create<yul::MStoreOp>(loc, tailAddr, size);
     return b.create<arith::AddIOp>(loc, tailDataAddr,
                                    bExt.genRoundUpToMultiple<32>(size));
   }
@@ -1523,14 +1506,7 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
   // String type.
   if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
-    Value dataLen = genDynSize(val, stringTy, loc);
-    Value dataAddr = genDataAddrPtr(val, stringTy, loc);
-    if (stringTy.getDataLocation() == sol::DataLocation::Memory)
-      b.create<yul::MCopyOp>(loc, addr, dataAddr, dataLen);
-    else if (stringTy.getDataLocation() == sol::DataLocation::CallData)
-      b.create<yul::CallDataCopyOp>(loc, addr, dataAddr, dataLen);
-    else
-      llvm_unreachable("NYI");
+    Value dataLen = genCopyStringDataToMemory(val, ty, addr, loc);
     return b.create<arith::AddIOp>(loc, addr, dataLen);
   }
 
