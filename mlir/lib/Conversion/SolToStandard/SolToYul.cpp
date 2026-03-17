@@ -76,6 +76,28 @@ struct DefaultFuncConstantOpLowering
   }
 };
 
+struct ExtFuncConstantOpLowering
+    : public OpConversionPattern<sol::ExtFuncConstantOp> {
+  using OpConversionPattern<sol::ExtFuncConstantOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ExtFuncConstantOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+    // Combine addr + selector into MSB-aligned i256:
+    // ((addr << 32) | selector) << 64
+    Value addr = adaptor.getAddr();
+    Value addrShifted =
+        r.create<arith::ShLIOp>(loc, addr, bExt.genI256Const(32));
+    Value selector = bExt.genI256Const(op.getSelector());
+    Value combined = r.create<arith::OrIOp>(loc, addrShifted, selector);
+    Value result =
+        r.create<arith::ShLIOp>(loc, combined, bExt.genI256Const(64));
+    r.replaceOp(op, result);
+    return success();
+  }
+};
+
 struct CastOpLowering : public OpConversionPattern<sol::CastOp> {
   using OpConversionPattern<sol::CastOp>::OpConversionPattern;
 
@@ -1678,11 +1700,6 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
       if (auto arrTy = dyn_cast<sol::ArrayType>(baseAddrTy)) {
         Value addrAtIdx;
 
-        Type eltTy = arrTy.getEltType();
-        (void)eltTy;
-        assert((isa<IntegerType>(eltTy) || sol::isNonPtrRefType(eltTy)) &&
-               "NYI");
-
         // Don't generate out-of-bounds check for constant indexing of static
         // arrays.
         if (!isa<BlockArgument>(idx) &&
@@ -1733,11 +1750,6 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
 
         // Memory/calldata struct
       } else if (auto structTy = dyn_cast<sol::StructType>(baseAddrTy)) {
-#ifndef NDEBUG
-        for (Type ty : structTy.getMemberTypes())
-          assert(isa<IntegerType>(ty) || sol::isNonPtrRefType(ty) && "NYI");
-#endif
-
         auto idxConstOp = cast<arith::ConstantIntOp>(idx.getDefiningOp());
         Value memberIdx =
             bExt.genIntCast(/*width=*/256, /*isSigned=*/false, idxConstOp);
@@ -2026,6 +2038,11 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
           // FuncRef is 64 bits, already i256.
           numBits = 64;
           preparedVal = remappedVal;
+        } else if (isa<sol::ExtFuncRefType>(eltTy)) {
+          // ExtFuncRef is MSB-aligned like bytes24. shr(64) to right-align.
+          numBits = 192;
+          preparedVal =
+              r.create<arith::ShRUIOp>(loc, remappedVal, bExt.genI256Const(64));
         } else if (isa<sol::EnumType>(eltTy)) {
           // Enums can have at most 256 members, so always 1 byte.
           numBits = 8;
@@ -2567,9 +2584,9 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
 
     // Generate the store of the selector.
     Value selectorAddr = evmB.genFreePtr();
-    auto shiftedSelector = APInt(/*numBits=*/256, op.getSelector()) << 224;
-    r.create<yul::MStoreOp>(loc, selectorAddr,
-                            bExt.genI256Const(shiftedSelector));
+    Value shiftedSelector = r.create<arith::ShLIOp>(loc, adaptor.getSelector(),
+                                                    bExt.genI256Const(224));
+    r.create<yul::MStoreOp>(loc, selectorAddr, shiftedSelector);
 
     // Generate the abi encoding code.
     Value tupleStart =
@@ -2823,6 +2840,48 @@ struct TransferOpLowering : public OpConversionPattern<sol::TransferOp> {
         genValueTransferStatus(loc, adaptor, arith::CmpIPredicate::eq, r);
     evmB.genForwardingRevert(statusIsZero);
     r.eraseOp(op);
+    return success();
+  }
+};
+
+struct ExtICallOpLowering : public OpConversionPattern<sol::ExtICallOp> {
+  using OpConversionPattern<sol::ExtICallOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ExtICallOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    // Split MSB-aligned ext func ref into addr and selector:
+    // selector = (callee >> 64) & 0xffffffff; addr = callee >> 96
+    Value callee = adaptor.getCallee();
+    Value shifted =
+        r.create<arith::ShRUIOp>(loc, callee, bExt.genI256Const(64));
+    Value selector = r.create<arith::AndIOp>(
+        loc, shifted, bExt.genI256Const(APInt::getLowBitsSet(256, 32)));
+    Value addr = r.create<arith::ShRUIOp>(loc, shifted, bExt.genI256Const(32));
+
+    // Get callee function type from the ext_func_ref type.
+    auto extFuncRefTy = cast<sol::ExtFuncRefType>(op.getCallee().getType());
+    auto calleeType = extFuncRefTy.getFuncTy();
+
+    // Lower to ExtCallOp - reuse all its lowering logic.
+    // Both ExtICallOp and ExtCallOp return (i1 status, results...).
+    auto extCall = r.create<sol::ExtCallOp>(loc, op.getResultTypes(),
+                                            /*callee=*/"",
+                                            /*ins=*/op.getCalleeOperands(),
+                                            /*addr=*/addr,
+                                            /*gas=*/adaptor.getGas(),
+                                            /*val=*/adaptor.getValue(),
+                                            /*selector=*/selector,
+                                            /*try_call=*/op.getTryCall(),
+                                            /*static_call=*/op.getStaticCall(),
+                                            /*delegate_call=*/false,
+                                            /*callee_type=*/calleeType,
+                                            /*arg_attrs=*/ArrayAttr{},
+                                            /*res_attrs=*/ArrayAttr{});
+
+    r.replaceOp(op, extCall.getResults());
     return success();
   }
 };
@@ -3888,7 +3947,7 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<ConstantOpLowering, FuncConstantOpLowering,
            DefaultFuncConstantOpLowering>(pats.getContext());
   pats.add<CastOpLowering, AddressCastOpLowering, ContractCastOpLowering,
-           EnumCastOpLowering, BytesCastOpLowering,
+           EnumCastOpLowering, BytesCastOpLowering, ExtFuncConstantOpLowering,
            ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
            ArithBinOpLowering<sol::SubOp, arith::SubIOp>,
            ArithBinOpLowering<sol::MulOp, arith::MulIOp>,
@@ -3950,9 +4009,9 @@ void evm::populateAbiPats(mlir::RewritePatternSet &pats,
 }
 
 void evm::populateExtCallPat(RewritePatternSet &pats, TypeConverter &tyConv) {
-  pats.add<ExtCallOpLowering, BareCallOpLowering, BareDelegateCallOpLowering,
-           BareStaticCallOpLowering, TryOpLowering, NewOpLowering,
-           CodeOpLowering, ObjectCodeOpLowering, SendOpLowering,
+  pats.add<ExtCallOpLowering, ExtICallOpLowering, BareCallOpLowering,
+           BareDelegateCallOpLowering, BareStaticCallOpLowering, TryOpLowering,
+           NewOpLowering, CodeOpLowering, ObjectCodeOpLowering, SendOpLowering,
            TransferOpLowering>(tyConv, pats.getContext());
 }
 

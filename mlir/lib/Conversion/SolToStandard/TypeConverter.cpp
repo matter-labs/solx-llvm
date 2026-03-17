@@ -61,6 +61,13 @@ evm::SolTypeConverter::SolTypeConverter() {
     return IntegerType::get(ty.getContext(), 256, IntegerType::Signless);
   });
 
+  // External function ref type
+  addConversion([&](sol::ExtFuncRefType ty) -> Type {
+    // MSB-aligned i256 like bytes24:
+    // | addr (160) | selector (32) | zeros (64) |
+    return IntegerType::get(ty.getContext(), 256, IntegerType::Signless);
+  });
+
   // Function type
   addConversion([&](FunctionType ty) -> Type {
     SmallVector<Type> convertedInpTys, convertedResTys;

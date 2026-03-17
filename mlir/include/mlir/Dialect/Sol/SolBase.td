@@ -159,6 +159,12 @@ def Sol_FuncRefType : Sol_Type<"FuncRef", "func_ref"> {
   let assemblyFormat = [{ `<` $funcTy `>` }];
 }
 
+// This represents an external function reference (address + selector).
+def Sol_ExtFuncRefType : Sol_Type<"ExtFuncRef", "ext_func_ref"> {
+  let parameters = (ins "FunctionType":$funcTy);
+  let assemblyFormat = [{ `<` $funcTy `>` }];
+}
+
 //===----------------------------------------------------------------------===//
 // Attributes
 //===----------------------------------------------------------------------===//

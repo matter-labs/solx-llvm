@@ -230,8 +230,8 @@ unsigned evm::getAlignment(Value ptr) {
 
 unsigned evm::getCallDataHeadSize(Type ty) {
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
-      isa<sol::BytesType>(ty) || sol::hasDynamicallySizedElt(ty) ||
-      sol::isAddressLikeType(ty))
+      isa<sol::BytesType>(ty) || isa<sol::ExtFuncRefType>(ty) ||
+      sol::hasDynamicallySizedElt(ty) || sol::isAddressLikeType(ty))
     return 32;
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
@@ -339,6 +339,19 @@ Value evm::Builder::normalizeABIScalarForEncoding(
     if (fromCalldata) {
       Value revertCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
                                                  casted, normalized);
+      genRevert(revertCond, loc);
+    }
+    return normalized;
+  }
+
+  // ExtFuncRef: MSB-aligned like bytes24. Low 64 bits must be zero.
+  if (isa<sol::ExtFuncRefType>(ty)) {
+    APInt mask = APInt::getHighBitsSet(256, 192);
+    Value normalized =
+        b.create<arith::AndIOp>(loc, val, bExt.genI256Const(mask));
+    if (fromCalldata) {
+      Value revertCond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                 val, normalized);
       genRevert(revertCond, loc);
     }
     return normalized;
@@ -746,6 +759,9 @@ Value evm::Builder::genCleanupPackedStorageValue(
     APInt mask = APInt::getLowBitsSet(256, 64);
     return b.create<arith::AndIOp>(loc, value, bExt.genI256Const(mask));
   }
+
+  if (isa<sol::ExtFuncRefType>(eltTy))
+    return b.create<arith::ShLIOp>(loc, value, bExt.genI256Const(64, loc));
 
   llvm_unreachable("Unexpected type for cleanup of packed storage value");
 }
@@ -1485,6 +1501,13 @@ Value evm::Builder::genABITupleEncoding(
     return tailAddr;
   }
 
+  // External function ref
+  if (isa<sol::ExtFuncRefType>(ty)) {
+    src = normalizeABIScalarForEncoding(ty, src, loc, srcDataLoc);
+    b.create<yul::MStoreOp>(loc, dstAddr, src);
+    return tailAddr;
+  }
+
   // Array type
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
     Value thirtyTwo = bExt.genI256Const(32);
@@ -1751,6 +1774,13 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
                                    bExt.genI256Const(bytesTy.getSize()));
   }
 
+  // External function ref.
+  if (isa<sol::ExtFuncRefType>(ty)) {
+    Value normalized = normalizeABIScalarForEncoding(ty, val, loc);
+    b.create<yul::MStoreOp>(loc, addr, normalized);
+    return b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(24));
+  }
+
   // String type.
   if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
     Value dataLen = genCopyStringDataToMemory(val, ty, addr, loc);
@@ -1787,9 +1817,10 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
           Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
           if (!isa<IntegerType>(eltTy) && !isa<sol::EnumType>(eltTy) &&
-              !isa<sol::BytesType>(eltTy) && !sol::isAddressLikeType(eltTy))
-            llvm_unreachable("Only integer, enum, address-like, and bytes "
-                             "types can be packed");
+              !isa<sol::BytesType>(eltTy) && !isa<sol::ExtFuncRefType>(eltTy) &&
+              !sol::isAddressLikeType(eltTy))
+            llvm_unreachable("Only integer, enum, address-like, bytes, and "
+                             "ext_func_ref types can be packed");
 
           srcVal = normalizeABIScalarForEncoding(eltTy, srcVal, loc, dataLoc);
           b.create<yul::MStoreOp>(loc, iDstAddr, srcVal);
@@ -2008,6 +2039,19 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
                                                 arg, maskedArg);
       genRevert(revertCond, loc);
     }
+    return arg;
+  }
+
+  // External function ref
+  if (isa<sol::ExtFuncRefType>(ty)) {
+    // Validate low 64 bits are zero.
+    Value arg = genLoad(addr);
+    APInt mask = APInt::getHighBitsSet(256, 192);
+    Value maskedArg =
+        b.create<arith::AndIOp>(loc, arg, bExt.genI256Const(mask));
+    auto revertCond =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, arg, maskedArg);
+    genRevert(revertCond, loc);
     return arg;
   }
 
