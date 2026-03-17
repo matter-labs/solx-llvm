@@ -1699,10 +1699,18 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
           Value iDstAddr = initArgs[0];
           Value iSrcAddr = initArgs[1];
           if (sol::hasDynamicallySizedElt(arrTy.getEltType())) {
+            Value innerOffset = genLoad(iSrcAddr);
+            auto invalidInnerOffsetCond = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::ugt, innerOffset,
+                bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
+            genRevertWithMsg(invalidInnerOffsetCond,
+                             "ABI decoding: invalid calldata array offset",
+                             loc);
+
             // The elements are offset wrt to the start of this array (after the
             // size field if dynamic) that contain the inner element.
             Value offsetFromSrcArr =
-                b.create<arith::AddIOp>(loc, srcAddr, genLoad(iSrcAddr));
+                b.create<arith::AddIOp>(loc, srcAddr, innerOffset);
             b.create<yul::MStoreOp>(
                 loc, iDstAddr,
                 genABITupleDecoding(arrTy.getEltType(), offsetFromSrcArr,
