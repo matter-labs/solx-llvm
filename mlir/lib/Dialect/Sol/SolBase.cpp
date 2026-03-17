@@ -192,8 +192,8 @@ bool mlir::sol::isAddressLikeType(Type ty) {
 
 unsigned mlir::sol::getStorageSlotCount(Type ty) {
   if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<BytesType>(ty) ||
-      isa<MappingType>(ty) || isa<FuncRefType>(ty) || isa<StringType>(ty) ||
-      isAddressLikeType(ty))
+      isa<MappingType>(ty) || isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) ||
+      isa<StringType>(ty) || isAddressLikeType(ty))
     return 1;
 
   if (auto arrTy = dyn_cast<ArrayType>(ty)) {
@@ -222,7 +222,7 @@ unsigned mlir::sol::getStorageSlotCount(Type ty) {
 bool mlir::sol::canBePacked(Type ty) {
   // Scalars can be packed within a slot.
   if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<BytesType>(ty) ||
-      isa<FuncRefType>(ty) || isAddressLikeType(ty))
+      isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) || isAddressLikeType(ty))
     return true;
 
   // Aggregates are slot-aligned and cannot be packed.
@@ -254,6 +254,10 @@ unsigned mlir::sol::getStorageByteSize(Type ty) {
   // Internal function reference.
   if (isa<FuncRefType>(ty))
     return 8;
+
+  // External function reference (address + selector).
+  if (isa<ExtFuncRefType>(ty))
+    return 20 + 4;
 
   llvm_unreachable("NYI");
 }

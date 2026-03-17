@@ -691,30 +691,33 @@ def Sol_FuncConstantOp : Sol_Op<"func_constant", [Pure]> {
   let assemblyFormat = "$sym attr-dict `:` type($addr)";
 }
 
-def ICallOp : Sol_Op<"icall", [CallOpInterface]> {
-  // FIXME: AnyType -> Sol_FuncRefType causes the asm printer to miss the prefix!
-  let arguments = (ins AnyType:$callee,
-                       Variadic<AnyType>:$callee_operands,
-                       OptionalAttr<DictArrayAttr>:$arg_attrs,
-                       OptionalAttr<DictArrayAttr>:$res_attrs);
+def Sol_ExtFuncConstantOp : Sol_Op<"ext_func_constant", [Pure]> {
+  let arguments = (ins Sol_AddressType:$addr, I32Attr:$selector);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$addr attr-dict `:` type($addr) `->` type($result)";
+}
+
+// Base class for indirect call ops (internal and external function pointers).
+class Sol_ICallOpBase<string mnemonic, dag extraArgs = (ins),
+                      string extraAsmFmt = "">
+    : Sol_Op<mnemonic, [CallOpInterface]> {
+  let arguments = !con((ins AnyType:$callee, Variadic<AnyType>:$callee_operands),
+                       extraArgs,
+                       (ins OptionalAttr<DictArrayAttr>:$arg_attrs,
+                            OptionalAttr<DictArrayAttr>:$res_attrs));
   let results = (outs Variadic<AnyType>);
 
-  // TODO: Custom builder that doesn't ask for arg/res attrs.
-
   let extraClassDeclaration = [{
-    ValueRange operands() { return getCalleeOperands(); }
-
     /// Get the argument operands to the called function.
     operand_range getArgOperands() {
-      return {arg_operand_begin(), arg_operand_end()};
+      auto ops = getCalleeOperands();
+      return {ops.begin(), ops.end()};
     }
 
     MutableOperandRange getArgOperandsMutable() {
       return getCalleeOperandsMutable();
     }
-
-    operand_iterator arg_operand_begin() { return ++operand_begin(); }
-    operand_iterator arg_operand_end() { return operand_end(); }
 
     /// Return the callee of this operation.
     CallInterfaceCallable getCallableForCallee() { return getCallee(); }
@@ -725,11 +728,18 @@ def ICallOp : Sol_Op<"icall", [CallOpInterface]> {
     }
   }];
 
-  let assemblyFormat = [{
-    $callee `(` $callee_operands `)` attr-dict `:`
-      type($callee) `,` functional-type($callee_operands, results)
-  }];
+  let assemblyFormat = !strconcat(
+    "$callee `(` $callee_operands `)` ", extraAsmFmt,
+    "attr-dict `:` type($callee) `,` functional-type($callee_operands, results)");
 }
+
+// Indirect call for internal function pointers.
+def ICallOp : Sol_ICallOpBase<"icall">;
+
+// Indirect call for external function pointers.
+def ExtICallOp : Sol_ICallOpBase<"ext_icall",
+    (ins UI256:$gas, UI256:$value, UnitAttr:$static_call, UnitAttr:$try_call),
+    "`gas` $gas `value` $value ">;
 
 def CallOp : Sol_Op<"call", [CallOpInterface]> {
   let arguments = (ins FlatSymbolRefAttr:$callee,
@@ -903,9 +913,10 @@ def Sol_GasLeftOp : Sol_Op<"gasleft"> {
 
 def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
   let arguments = (ins StrAttr:$callee, Variadic<AnyType>:$ins,
-                       Sol_AddressType:$addr, UI256:$gas, UI256:$val, UnitAttr:$try_call,
-                       UnitAttr:$static_call, UnitAttr:$delegate_call,
-                       I32Attr:$selector,
+                       Sol_AddressType:$addr, UI256:$gas, UI256:$val,
+                       UI256:$selector,
+                       UnitAttr:$try_call, UnitAttr:$static_call,
+                       UnitAttr:$delegate_call,
                        TypeAttrOf<FunctionType>:$callee_type,
                        OptionalAttr<DictArrayAttr>:$arg_attrs,
                        OptionalAttr<DictArrayAttr>:$res_attrs);
@@ -918,11 +929,11 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
     // CallOpInterface
     //===------------------------------------------------------------------===//
     operand_range getArgOperands() {
-      return {operand_begin() + 1, operand_end()};
+      auto ins = getIns();
+      return {ins.begin(), ins.end()};
     }
     MutableOperandRange getArgOperandsMutable() {
-      return MutableOperandRange(getOperation(), /*start=*/1,
-          /*length=*/getNumOperands() - 1);
+      return getInsMutable();
     }
     CallInterfaceCallable getCallableForCallee() {
       return (*this)->getAttrOfType<SymbolRefAttr>("callee");
@@ -933,8 +944,8 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
   }];
 
   let assemblyFormat = [{
-    $callee `(` $ins `)` `at` $addr `gas` $gas `value` $val attr-dict `:`
-      qualified(type($addr)) `,` functional-type($ins, results)
+    $callee `(` $ins `)` `at` $addr `gas` $gas `value` $val `selector` $selector
+      attr-dict `:` qualified(type($addr)) `,` functional-type($ins, results)
   }];
 }
 
