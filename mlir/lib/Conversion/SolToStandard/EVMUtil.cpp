@@ -1816,9 +1816,14 @@ void evm::Builder::genABITupleDecoding(TypeRange tys, Value tupleStart,
   Value headAddr = tupleStart;
   for (Type ty : tys) {
     if (sol::hasDynamicallySizedElt(ty)) {
-      // TODO: Do we need the "ABI decoding: invalid tuple offset" check here?
-      Value tailAddr =
-          b.create<arith::AddIOp>(loc, tupleStart, genLoad(headAddr));
+      Value tailOffset = genLoad(headAddr);
+      auto invalidOffsetCond = b.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::ugt, tailOffset,
+          bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
+      genRevertWithMsg(invalidOffsetCond, "ABI decoding: invalid tuple offset",
+                       loc);
+
+      Value tailAddr = b.create<arith::AddIOp>(loc, tupleStart, tailOffset);
       results.push_back(genABITupleDecoding(ty, tailAddr, fromMem, tupleStart,
                                             tupleEnd, loc));
     } else {
