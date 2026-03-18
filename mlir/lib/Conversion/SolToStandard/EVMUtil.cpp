@@ -24,6 +24,199 @@
 
 using namespace mlir;
 
+namespace {
+// Reads struct members for ABI encoding from a concrete source location
+// (calldata, memory, or storage).
+struct StructEncodeMemberReader {
+  sol::StructType structTy;
+  evm::Builder &evmB;
+  OpBuilder &b;
+  Location loc;
+  mlir::solgen::BuilderExt bExt;
+
+  StructEncodeMemberReader(sol::StructType structTy, evm::Builder &evmB,
+                           OpBuilder &b, Location loc)
+      : structTy(structTy), evmB(evmB), b(b), loc(loc), bExt(b, loc) {}
+
+  virtual ~StructEncodeMemberReader() = default;
+
+  Type getMemberType(uint64_t memberIdx) const {
+    return structTy.getMemberTypes()[memberIdx];
+  }
+
+  // Returns the source value for the struct member at memberIdx.
+  virtual Value read(uint64_t memberIdx) = 0;
+
+  // Emits instruction to advance source position for the next member,
+  // if needed.
+  virtual void advance(uint64_t memberIdx) = 0;
+};
+
+struct StructEncodeMemberReaderCallData final : StructEncodeMemberReader {
+  // Base address of this struct head in calldata.
+  Value baseAddr;
+  // Current calldata head cursor for member traversal.
+  Value curAddr;
+
+  StructEncodeMemberReaderCallData(sol::StructType structTy, evm::Builder &evmB,
+                                   OpBuilder &b, Location loc, Value baseAddr)
+      : StructEncodeMemberReader(structTy, evmB, b, loc), baseAddr(baseAddr),
+        curAddr(baseAddr) {}
+
+  Value read(uint64_t memberIdx) override {
+    Type memTy = getMemberType(memberIdx);
+    if (sol::hasDynamicallySizedElt(memTy)) {
+      auto genCalldataAccessLengthAndStrideGuards = [&](Value dataAddr,
+                                                        Value length,
+                                                        Value stride) {
+        // Check that the dynamic length fits uint64.
+        Value invalidLength = b.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::ugt, length,
+            bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
+        evmB.genRevertWithMsg(invalidLength, "Invalid calldata access length",
+                              loc);
+
+        // Check that data start + length * stride stays within calldata.
+        Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
+        Value maxDataAddr = b.create<arith::SubIOp>(
+            loc, callDataSize, b.create<arith::MulIOp>(loc, length, stride));
+        Value invalidStride = b.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::sgt, dataAddr, maxDataAddr);
+        evmB.genRevertWithMsg(invalidStride, "Invalid calldata access stride",
+                              loc);
+      };
+
+      // Dynamic calldata members are encoded as offsets wrt to the beginning
+      // of this struct head.
+      Value memberOffset =
+          evmB.genLoad(curAddr, sol::DataLocation::CallData, loc);
+
+      // Check that the dynamic member head offset is within calldata bounds.
+      unsigned neededLength = evm::getCallDataHeadSize(memTy);
+      assert(neededLength > 0 && "Expected non-zero calldata head size");
+      Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
+      Value maxRelOffset = b.create<arith::SubIOp>(
+          loc, b.create<arith::SubIOp>(loc, callDataSize, baseAddr),
+          bExt.genI256Const(neededLength - 1));
+      Value invalidOffset = b.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::sge, memberOffset, maxRelOffset);
+      evmB.genRevertWithMsg(invalidOffset, "Invalid calldata access offset",
+                            loc);
+      Value memberAddr = b.create<arith::AddIOp>(loc, baseAddr, memberOffset);
+
+      if (auto memArrTy = dyn_cast<sol::ArrayType>(memTy)) {
+        if (memArrTy.isDynSized()) {
+          // Dynamic calldata arrays are passed as (dataPtr, size) pair.
+          Value innerSize = b.create<yul::CallDataLoadOp>(loc, memberAddr);
+          Value innerDataAddr =
+              b.create<arith::AddIOp>(loc, memberAddr, bExt.genI256Const(32));
+          genCalldataAccessLengthAndStrideGuards(
+              innerDataAddr, innerSize,
+              bExt.genI256Const(
+                  evm::getCallDataHeadSize(memArrTy.getEltType())));
+          return bExt.genLLVMStruct({innerDataAddr, innerSize});
+        }
+
+        // Static calldata arrays are forwarded by address.
+        return memberAddr;
+      }
+
+      if (isa<sol::StringType>(memTy)) {
+        // Strings are dynamic and use the same (dataPtr, size) representation.
+        Value innerSize = b.create<yul::CallDataLoadOp>(loc, memberAddr);
+        Value innerDataAddr =
+            b.create<arith::AddIOp>(loc, memberAddr, bExt.genI256Const(32));
+        genCalldataAccessLengthAndStrideGuards(innerDataAddr, innerSize,
+                                               bExt.genI256Const(1));
+        return bExt.genLLVMStruct({innerDataAddr, innerSize});
+      }
+
+      // Nested structs in calldata are forwarded by their head address.
+      if (isa<sol::StructType>(memTy))
+        return memberAddr;
+
+      llvm_unreachable("Unexpected dynamically sized type in calldata struct");
+    }
+
+    if (sol::isNonPtrRefType(memTy)) {
+      // Static non-pointer refs are laid out inline in calldata head and
+      // should be passed by address.
+      return curAddr;
+    }
+
+    return evmB.genLoad(curAddr, sol::DataLocation::CallData, loc);
+  }
+
+  void advance(uint64_t memberIdx) override {
+    Type memTy = getMemberType(memberIdx);
+    curAddr = b.create<arith::AddIOp>(
+        loc, curAddr, bExt.genI256Const(evm::getCallDataHeadSize(memTy)));
+  }
+};
+
+struct StructEncodeMemberReaderMemory final : StructEncodeMemberReader {
+  // Current memory head cursor for member traversal.
+  Value curAddr;
+
+  StructEncodeMemberReaderMemory(sol::StructType structTy, evm::Builder &evmB,
+                                 OpBuilder &b, Location loc, Value curAddr)
+      : StructEncodeMemberReader(structTy, evmB, b, loc), curAddr(curAddr) {}
+
+  Value read(uint64_t) override {
+    Value srcVal = evmB.genLoad(curAddr, sol::DataLocation::Memory, loc);
+    return srcVal;
+  }
+
+  void advance(uint64_t) override {
+    // In memory, each struct member head entry occupies one 32-byte slot.
+    curAddr = b.create<arith::AddIOp>(loc, curAddr, bExt.genI256Const(32));
+  }
+};
+
+struct StructEncodeMemberReaderStorage final : StructEncodeMemberReader {
+  // Base storage slot for the struct.
+  Value baseAddr;
+
+  // Cache the last loaded storage slot to avoid repeated sload for packed
+  // members that share the same slot.
+  std::optional<uint64_t> previousSlotOffset;
+  Value previousSlotValue;
+
+  StructEncodeMemberReaderStorage(sol::StructType structTy, evm::Builder &evmB,
+                                  OpBuilder &b, Location loc, Value baseAddr)
+      : StructEncodeMemberReader(structTy, evmB, b, loc), baseAddr(baseAddr) {}
+
+  Value read(uint64_t memberIdx) override {
+    auto [slotOffset, byteOffset] = structTy.getStorageMemberOffset(memberIdx);
+    Type memTy = getMemberType(memberIdx);
+    if (sol::canBePacked(memTy)) {
+      // Packed members are extracted from the resolved slot and cleaned to the
+      // source type width.
+      if (!previousSlotOffset || *previousSlotOffset != slotOffset) {
+        Value memberSlot = b.create<arith::AddIOp>(
+            loc, baseAddr, bExt.genI256Const(slotOffset));
+        previousSlotValue =
+            evmB.genLoad(memberSlot, sol::DataLocation::Storage, loc);
+        previousSlotOffset = slotOffset;
+      }
+
+      Value shifted = previousSlotValue;
+      if (byteOffset != 0)
+        shifted = b.create<arith::ShRUIOp>(loc, previousSlotValue,
+                                           bExt.genI256Const(byteOffset * 8));
+
+      return evmB.genCleanupPackedStorageValue(memTy, shifted, loc);
+    }
+
+    return b.create<arith::AddIOp>(loc, baseAddr,
+                                   bExt.genI256Const(slotOffset));
+  }
+
+  // Storage traversal is indexed by member number and precomputed offsets.
+  void advance(uint64_t) override {}
+};
+} // namespace
+
 unsigned evm::getAlignment(evm::AddrSpace addrSpace) {
   // FIXME: Confirm this!
   return addrSpace == evm::AddrSpace_Stack ? evm::ByteLen_Field
@@ -43,6 +236,13 @@ unsigned evm::getCallDataHeadSize(Type ty) {
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
     return arrTy.getSize() * getCallDataHeadSize(arrTy.getEltType());
+
+  if (auto structTy = dyn_cast<sol::StructType>(ty)) {
+    unsigned size = 0;
+    for (Type memTy : structTy.getMemberTypes())
+      size += getCallDataHeadSize(memTy);
+    return size;
+  }
 
   llvm_unreachable("NYI: Other types");
 }
@@ -512,6 +712,42 @@ Value evm::Builder::genPunchHole(Value slot, Value shiftBits, unsigned numBits,
   else
     slotVal = b.create<yul::SLoadOp>(loc, slot);
   return genPunchHoleInValue(b, slotVal, shiftBits, numBits, loc);
+}
+
+Value evm::Builder::genCleanupPackedStorageValue(
+    Type eltTy, Value value, std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  if (auto bytesTy = dyn_cast<sol::BytesType>(eltTy)) {
+    unsigned numBits = bytesTy.getSize() * 8;
+    if (numBits == 256)
+      return value;
+    return b.create<arith::ShLIOp>(loc, value,
+                                   bExt.genI256Const(256 - numBits, loc));
+  }
+
+  if (auto intTy = dyn_cast<IntegerType>(eltTy))
+    return bExt.genIntCastWithBoolCleanup(intTy.getWidth(), intTy.isSigned(),
+                                          value, loc,
+                                          /*maskBoolAsStorageByte=*/true);
+
+  if (sol::isAddressLikeType(eltTy)) {
+    APInt mask = APInt::getLowBitsSet(256, 160);
+    return b.create<arith::AndIOp>(loc, value, bExt.genI256Const(mask));
+  }
+
+  if (isa<sol::EnumType>(eltTy)) {
+    APInt mask = APInt::getLowBitsSet(256, 8);
+    return b.create<arith::AndIOp>(loc, value, bExt.genI256Const(mask));
+  }
+
+  if (isa<sol::FuncRefType>(eltTy)) {
+    APInt mask = APInt::getLowBitsSet(256, 64);
+    return b.create<arith::AndIOp>(loc, value, bExt.genI256Const(mask));
+  }
+
+  llvm_unreachable("Unexpected type for cleanup of packed storage value");
 }
 
 Value evm::Builder::genLoad(Value addr, sol::DataLocation dataLoc,
@@ -1335,6 +1571,69 @@ Value evm::Builder::genABITupleEncoding(
     return forOp.getResult(2);
   }
 
+  // Struct type
+  if (auto structTy = dyn_cast<sol::StructType>(ty)) {
+    // If the struct itself is emitted into tail, initialize the struct-local
+    // tail to just past its ABI head.
+    if (dstAddrInTail) {
+      unsigned structHeadSize = 0;
+      for (Type memTy : structTy.getMemberTypes())
+        structHeadSize += getCallDataHeadSize(memTy);
+      tailAddr = b.create<arith::AddIOp>(loc, dstAddr,
+                                         bExt.genI256Const(structHeadSize));
+    }
+
+    auto dataLoc = structTy.getDataLocation();
+    std::unique_ptr<StructEncodeMemberReader> reader;
+    switch (dataLoc) {
+    case sol::DataLocation::CallData:
+      reader = std::make_unique<StructEncodeMemberReaderCallData>(
+          structTy, *this, b, loc, src);
+      break;
+    case sol::DataLocation::Memory:
+      reader = std::make_unique<StructEncodeMemberReaderMemory>(structTy, *this,
+                                                                b, loc, src);
+      break;
+    case sol::DataLocation::Storage:
+      reader = std::make_unique<StructEncodeMemberReaderStorage>(
+          structTy, *this, b, loc, src);
+      break;
+    default:
+      llvm_unreachable("Unexpected data location for struct encoding");
+    }
+
+    Value structHeadAddr = dstAddr;
+    auto memberTypes = structTy.getMemberTypes();
+    for (uint64_t i = 0, e = memberTypes.size(); i < e; ++i) {
+      Type memTy = memberTypes[i];
+      Value srcVal = reader->read(i);
+
+      if (sol::hasDynamicallySizedElt(memTy)) {
+        // Dynamic members store a tail offset in the head, then encode payload
+        // at the current tail.
+        b.create<yul::MStoreOp>(
+            loc, structHeadAddr,
+            b.create<arith::SubIOp>(loc, tailAddr, dstAddr));
+        tailAddr =
+            genABITupleEncoding(memTy, srcVal, tailAddr, /*dstAddrInTail=*/true,
+                                dstAddr, tailAddr, loc, dataLoc);
+      } else {
+        // Static members never advance the tail on their own.
+        tailAddr = genABITupleEncoding(memTy, srcVal, structHeadAddr,
+                                       /*dstAddrInTail=*/false, dstAddr,
+                                       tailAddr, loc, dataLoc);
+      }
+
+      // Advance the addresses iff there are more members to encode.
+      if (i + 1 < e) {
+        structHeadAddr = b.create<arith::AddIOp>(
+            loc, structHeadAddr, bExt.genI256Const(getCallDataHeadSize(memTy)));
+        reader->advance(i);
+      }
+    }
+    return tailAddr;
+  }
+
   // String type
   if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
     auto tailDataAddr =
@@ -1540,6 +1839,15 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
     genRevertWithMsg(invalidRangeCond, revertMsg, loc);
   };
 
+  // Revert if offset is above uint64 max (0xffffffffffffffff).
+  auto genRevertIfOffsetTooLarge = [&](Value offset,
+                                       std::string const &revertMsg) {
+    auto invalidOffsetCond = b.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ugt, offset,
+        bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
+    genRevertWithMsg(invalidOffsetCond, revertMsg, loc);
+  };
+
   // Revert if a value is past tuple end.
   auto genRevertIfPastTupleEnd = [&](Value value,
                                      std::string const &revertMsg) {
@@ -1649,12 +1957,8 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
           Value iSrcAddr = initArgs[1];
           if (sol::hasDynamicallySizedElt(arrTy.getEltType())) {
             Value innerOffset = genLoad(iSrcAddr);
-            auto invalidInnerOffsetCond = b.create<arith::CmpIOp>(
-                loc, arith::CmpIPredicate::ugt, innerOffset,
-                bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
-            genRevertWithMsg(invalidInnerOffsetCond,
-                             "ABI decoding: invalid calldata array offset",
-                             loc);
+            genRevertIfOffsetTooLarge(
+                innerOffset, "ABI decoding: invalid calldata array offset");
 
             // The elements are offset wrt to the start of this array (after the
             // size field if dynamic) that contain the inner element.
@@ -1740,6 +2044,67 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
     // rounded payload boundary.
     Value cleanupAddr = b.create<arith::AddIOp>(loc, dstDataAddr, sizeInBytes);
     b.create<yul::MStoreOp>(loc, cleanupAddr, bExt.genI256Const(0));
+
+    return dstAddr;
+  }
+
+  // Struct type
+  if (auto structTy = dyn_cast<sol::StructType>(ty)) {
+    auto dataLoc = structTy.getDataLocation();
+    assert((dataLoc == sol::DataLocation::CallData ||
+            dataLoc == sol::DataLocation::Memory) &&
+           "Unexpected struct data location");
+
+    unsigned structHeadSize = 0;
+    for (Type memTy : structTy.getMemberTypes())
+      structHeadSize += getCallDataHeadSize(memTy);
+
+    std::string const &headTooShortMsg =
+        dataLoc == sol::DataLocation::CallData
+            ? "ABI decoding: struct calldata too short"
+            : "ABI decoding: struct data too short";
+    Value srcEnd =
+        b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(structHeadSize));
+    genRevertIfPastTupleEnd(srcEnd, headTooShortMsg);
+
+    // Keep calldata structs as calldata pointers.
+    if (dataLoc == sol::DataLocation::CallData)
+      return addr;
+
+    Value dstAddr = genMemAlloc(
+        bExt.genI256Const(structTy.getMemberTypes().size() * 32), loc);
+    Value dstHeadAddr = dstAddr;
+    Value srcHeadAddr = addr;
+    for (Type memTy : structTy.getMemberTypes()) {
+      Value memberVal;
+      if (sol::hasDynamicallySizedElt(memTy)) {
+        Value tailOffset = genLoad(srcHeadAddr);
+        genRevertIfOffsetTooLarge(tailOffset,
+                                  "ABI decoding: invalid struct offset");
+
+        Value tailAddr = b.create<arith::AddIOp>(loc, addr, tailOffset);
+        memberVal =
+            genABITupleDecoding(memTy, tailAddr, fromMem, addr, tupleEnd, loc);
+      } else {
+        memberVal = genABITupleDecoding(memTy, srcHeadAddr, fromMem, addr,
+                                        tupleEnd, loc);
+      }
+
+      // If the element type is an integer smaller than 256 bits, we need
+      // to extend it. In case we don't do that, store will place the
+      // value in the higher bits, which is incorrect.
+      auto intTy = dyn_cast<IntegerType>(memberVal.getType());
+      if (intTy && intTy.getWidth() < 256)
+        memberVal =
+            bExt.genIntCast(/*width=*/256, intTy.isSigned(), memberVal, loc);
+
+      b.create<yul::MStoreOp>(loc, dstHeadAddr, memberVal);
+
+      srcHeadAddr = b.create<arith::AddIOp>(
+          loc, srcHeadAddr, bExt.genI256Const(getCallDataHeadSize(memTy)));
+      dstHeadAddr =
+          b.create<arith::AddIOp>(loc, dstHeadAddr, bExt.genI256Const(32));
+    }
 
     return dstAddr;
   }

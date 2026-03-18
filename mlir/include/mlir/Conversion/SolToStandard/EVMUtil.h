@@ -168,6 +168,12 @@ public:
                      sol::DataLocation dataLoc = sol::DataLocation::Storage,
                      std::optional<Location> locArg = std::nullopt);
 
+  /// Cleans up a packed storage value to match Solidity storage-load semantics
+  /// for the given element type.
+  Value
+  genCleanupPackedStorageValue(Type eltTy, Value value,
+                               std::optional<Location> locArg = std::nullopt);
+
   /// Inserts integer value (<=32 bytes) to the slot value:
   /// or(and(slot, holeMask), shiftedVal), where
   /// holeMask = not(ones(numBits) << offset * 8),
