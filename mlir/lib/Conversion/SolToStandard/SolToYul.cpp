@@ -1888,37 +1888,8 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
         Value shiftBits =
             r.create<arith::MulIOp>(loc, offset, bExt.genI256Const(8));
         Value shifted = r.create<arith::ShRUIOp>(loc, slotVal, shiftBits);
-
-        // BytesType: shl to restore high-bits alignment.
-        if (auto bytesTy = dyn_cast<sol::BytesType>(eltTy)) {
-          unsigned numBits = bytesTy.getSize() * 8;
-          Value res = r.create<arith::ShLIOp>(loc, shifted,
-                                              bExt.genI256Const(256 - numBits));
-          r.replaceOp(op, res);
-        } else if (sol::isAddressLikeType(op.getType())) {
-          APInt mask = APInt::getLowBitsSet(256, 160);
-          r.replaceOpWithNewOp<arith::AndIOp>(op, shifted,
-                                              bExt.genI256Const(mask));
-        } else if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
-          Value castedRes = bExt.genIntCastWithBoolCleanup(
-              intTy.getWidth(), intTy.isSigned(), shifted, loc,
-              /*maskBoolAsStorageByte=*/true);
-          r.replaceOp(op, castedRes);
-        } else if (isa<sol::FuncRefType>(eltTy)) {
-          // FuncRef is 64 bits, mask to lower 64 bits.
-          APInt mask = APInt::getLowBitsSet(256, 64);
-          Value masked =
-              r.create<arith::AndIOp>(loc, shifted, bExt.genI256Const(mask));
-          r.replaceOp(op, masked);
-        } else if (isa<sol::EnumType>(eltTy)) {
-          // Enums are 1 byte, mask to lower 8 bits.
-          APInt mask = APInt::getLowBitsSet(256, 8);
-          Value masked =
-              r.create<arith::AndIOp>(loc, shifted, bExt.genI256Const(mask));
-          r.replaceOp(op, masked);
-        } else {
-          llvm_unreachable("NYI");
-        }
+        Value cleaned = evmB.genCleanupPackedStorageValue(eltTy, shifted, loc);
+        r.replaceOp(op, cleaned);
       } else {
         // addr is just slot
         Value slotVal = genSlotLoad(addr);
