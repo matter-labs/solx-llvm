@@ -26,6 +26,126 @@
 using namespace mlir;
 
 namespace {
+
+// Returns the minimum inline head that must be readable after following a
+// calldata offset to a struct value. This is the sum of the member head sizes,
+// which differs from getCallDataHeadSize(), as the outer head contributes one
+// 32-byte offset slot for a dynamically encoded struct, but the referenced
+// struct tail still begins with the full inline head of its members.
+unsigned getStructCalldataEncodedTailSize(sol::StructType structTy) {
+  unsigned structHeadSize = 0;
+  for (Type memTy : structTy.getMemberTypes())
+    structHeadSize += evm::getCallDataHeadSize(memTy);
+  return structHeadSize;
+}
+
+// Returns the minimum inline head that must be readable after following a
+// calldata offset to this reference type. This is computed for the referenced
+// type itself, not necessarily for the top-level parameter type being encoded.
+//
+// Examples:
+// - `uint256[]` and `string` need 32 bytes, because their tails start with a
+//   length word.
+// - `uint256[][2]` needs 64 bytes when that type is itself reached through an
+//   offset, for example as `struct S { uint256[][2] a; }` or as an element of
+//   `uint256[][2][]`. The referenced fixed-size array tail starts with two
+//   32-byte element head entries.
+// - `uint256[2][]` needs 32 bytes, because the referenced dynamic array tail
+//   starts with its length word.
+// - Structs use the sum of their member head sizes.
+unsigned getCalldataEncodedTailSize(Type ty) {
+  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
+    if (arrTy.isDynSized())
+      return 32;
+    return arrTy.getSize() * evm::getCallDataHeadSize(arrTy.getEltType());
+  }
+  if (auto structTy = dyn_cast<sol::StructType>(ty))
+    return getStructCalldataEncodedTailSize(structTy);
+  if (isa<sol::StringType>(ty))
+    return 32;
+  llvm_unreachable("Expected dynamically encoded calldata reference type");
+}
+
+// Resolves a calldata reference reached through an offset-bearing head entry.
+// Fixed-size refs with dynamic children still lower to a single base address,
+// while dynamically sized refs materialize {data, length}.
+Value genCalldataAccessRef(evm::Builder &evmB, OpBuilder &b, Location loc,
+                           Type ty, Value baseAddr, Value ptr) {
+  mlir::solgen::BuilderExt bExt(b, loc);
+  assert(sol::getDataLocation(ty) == sol::DataLocation::CallData &&
+         "Expected calldata reference type");
+  assert(sol::hasDynamicallySizedElt(ty) &&
+         "Expected dynamically encoded calldata reference");
+
+  // Dynamically encoded calldata references are stored as offsets relative to
+  // the start of the enclosing calldata head.
+  Value relOffset = evmB.genLoad(ptr, sol::DataLocation::CallData, loc);
+  unsigned neededLength = getCalldataEncodedTailSize(ty);
+  assert(neededLength > 0 && "Expected non-zero calldata access size");
+
+  Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
+
+  // The referenced head must fit entirely within the original calldata blob.
+  // 'maxRelOffset' is the last relative offset whose required inline head is
+  // still readable from 'baseAddr'.
+  Value maxRelOffset = b.create<arith::SubIOp>(
+      loc, b.create<arith::SubIOp>(loc, callDataSize, baseAddr),
+      bExt.genI256Const(neededLength - 1));
+  Value invalidOffset = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
+                                                relOffset, maxRelOffset);
+  evmB.genRevertWithMsg(invalidOffset, "Invalid calldata access offset", loc);
+
+  Value refAddr = b.create<arith::AddIOp>(loc, baseAddr, relOffset);
+  auto genLengthAndStrideGuards = [&](Value dataAddr, Value length,
+                                      Value stride) {
+    // Dynamic calldata payloads are materialized as {dataPtr, length}, so both
+    // the decoded length and the implied payload range must stay in bounds.
+    Value invalidLength = b.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ugt, length,
+        bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
+    evmB.genRevertWithMsg(invalidLength, "Invalid calldata access length", loc);
+
+    Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
+    Value maxDataAddr = b.create<arith::SubIOp>(
+        loc, callDataSize, b.create<arith::MulIOp>(loc, length, stride));
+    Value invalidStride = b.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::sgt, dataAddr, maxDataAddr);
+    evmB.genRevertWithMsg(invalidStride, "Invalid calldata access stride", loc);
+  };
+
+  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
+    if (!arrTy.isDynSized())
+      // Fixed-size calldata arrays with dynamic children are still forwarded as
+      // a single base address, as recursive element handling resolves child
+      // heads.
+      return refAddr;
+
+    // Dynamic calldata arrays are passed as {dataPtr, size}.
+    Value length = b.create<yul::CallDataLoadOp>(loc, refAddr);
+    Value dataAddr =
+        b.create<arith::AddIOp>(loc, refAddr, bExt.genI256Const(32));
+    genLengthAndStrideGuards(
+        dataAddr, length,
+        bExt.genI256Const(evm::getCallDataHeadSize(arrTy.getEltType())));
+    return bExt.genLLVMStruct({dataAddr, length});
+  }
+
+  if (isa<sol::StringType>(ty)) {
+    // Strings use the same {dataPtr, size} representation as bytes arrays.
+    Value length = b.create<yul::CallDataLoadOp>(loc, refAddr);
+    Value dataAddr =
+        b.create<arith::AddIOp>(loc, refAddr, bExt.genI256Const(32));
+    genLengthAndStrideGuards(dataAddr, length, bExt.genI256Const(1));
+    return bExt.genLLVMStruct({dataAddr, length});
+  }
+
+  if (isa<sol::StructType>(ty))
+    // Nested calldata structs are forwarded by their head address.
+    return refAddr;
+
+  llvm_unreachable("Unexpected dynamically encoded calldata reference");
+}
+
 // Reads struct members for ABI encoding from a concrete source location
 // (calldata, memory, or storage).
 struct StructEncodeMemberReader {
@@ -66,84 +186,13 @@ struct StructEncodeMemberReaderCallData final : StructEncodeMemberReader {
 
   Value read(uint64_t memberIdx) override {
     Type memTy = getMemberType(memberIdx);
-    if (sol::hasDynamicallySizedElt(memTy)) {
-      auto genCalldataAccessLengthAndStrideGuards = [&](Value dataAddr,
-                                                        Value length,
-                                                        Value stride) {
-        // Check that the dynamic length fits uint64.
-        Value invalidLength = b.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::ugt, length,
-            bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
-        evmB.genRevertWithMsg(invalidLength, "Invalid calldata access length",
-                              loc);
+    if (sol::hasDynamicallySizedElt(memTy))
+      return genCalldataAccessRef(evmB, b, loc, memTy, baseAddr, curAddr);
 
-        // Check that data start + length * stride stays within calldata.
-        Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
-        Value maxDataAddr = b.create<arith::SubIOp>(
-            loc, callDataSize, b.create<arith::MulIOp>(loc, length, stride));
-        Value invalidStride = b.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::sgt, dataAddr, maxDataAddr);
-        evmB.genRevertWithMsg(invalidStride, "Invalid calldata access stride",
-                              loc);
-      };
-
-      // Dynamic calldata members are encoded as offsets wrt to the beginning
-      // of this struct head.
-      Value memberOffset =
-          evmB.genLoad(curAddr, sol::DataLocation::CallData, loc);
-
-      // Check that the dynamic member head offset is within calldata bounds.
-      unsigned neededLength = evm::getCallDataHeadSize(memTy);
-      assert(neededLength > 0 && "Expected non-zero calldata head size");
-      Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
-      Value maxRelOffset = b.create<arith::SubIOp>(
-          loc, b.create<arith::SubIOp>(loc, callDataSize, baseAddr),
-          bExt.genI256Const(neededLength - 1));
-      Value invalidOffset = b.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::sge, memberOffset, maxRelOffset);
-      evmB.genRevertWithMsg(invalidOffset, "Invalid calldata access offset",
-                            loc);
-      Value memberAddr = b.create<arith::AddIOp>(loc, baseAddr, memberOffset);
-
-      if (auto memArrTy = dyn_cast<sol::ArrayType>(memTy)) {
-        if (memArrTy.isDynSized()) {
-          // Dynamic calldata arrays are passed as (dataPtr, size) pair.
-          Value innerSize = b.create<yul::CallDataLoadOp>(loc, memberAddr);
-          Value innerDataAddr =
-              b.create<arith::AddIOp>(loc, memberAddr, bExt.genI256Const(32));
-          genCalldataAccessLengthAndStrideGuards(
-              innerDataAddr, innerSize,
-              bExt.genI256Const(
-                  evm::getCallDataHeadSize(memArrTy.getEltType())));
-          return bExt.genLLVMStruct({innerDataAddr, innerSize});
-        }
-
-        // Static calldata arrays are forwarded by address.
-        return memberAddr;
-      }
-
-      if (isa<sol::StringType>(memTy)) {
-        // Strings are dynamic and use the same (dataPtr, size) representation.
-        Value innerSize = b.create<yul::CallDataLoadOp>(loc, memberAddr);
-        Value innerDataAddr =
-            b.create<arith::AddIOp>(loc, memberAddr, bExt.genI256Const(32));
-        genCalldataAccessLengthAndStrideGuards(innerDataAddr, innerSize,
-                                               bExt.genI256Const(1));
-        return bExt.genLLVMStruct({innerDataAddr, innerSize});
-      }
-
-      // Nested structs in calldata are forwarded by their head address.
-      if (isa<sol::StructType>(memTy))
-        return memberAddr;
-
-      llvm_unreachable("Unexpected dynamically sized type in calldata struct");
-    }
-
-    if (sol::isNonPtrRefType(memTy)) {
+    if (sol::isNonPtrRefType(memTy))
       // Static non-pointer refs are laid out inline in calldata head and
       // should be passed by address.
       return curAddr;
-    }
 
     return evmB.genLoad(curAddr, sol::DataLocation::CallData, loc);
   }
@@ -1954,20 +2003,6 @@ Value evm::Builder::genABITupleEncoding(
             Value srcVal = materializeSrcVal(loc, iSrcAddr);
             Value nextTailAddr;
             if (sol::hasDynamicallySizedElt(eltTy)) {
-              if (dataLoc == sol::DataLocation::CallData) {
-                // Multi-dimensional dynamic arrays in calldata tracks inner
-                // allocations using offsets wrt to the start array. Here
-                // `srcVal` (on the rhs) is that offset.
-                Value innerAddr =
-                    b.create<arith::AddIOp>(loc, srcArrAddr, srcVal);
-                // Construct the fat pointer.
-                Value innerSize = b.create<yul::CallDataLoadOp>(loc, innerAddr);
-                Value innerDataAddr =
-                    b.create<arith::AddIOp>(loc, innerAddr, thirtyTwo);
-                mlir::solgen::BuilderExt bExt(b, loc);
-                srcVal = bExt.genLLVMStruct({innerDataAddr, innerSize});
-              }
-
               b.create<yul::MStoreOp>(
                   loc, iDstAddr,
                   b.create<arith::SubIOp>(loc, iTailAddr, dstArrAddr));
@@ -1990,14 +2025,39 @@ Value evm::Builder::genABITupleEncoding(
       return forOp.getResult(2);
     };
 
-    // Memory and calldata arrays share a linear, word-strided traversal:
-    // load one element value per step and feed it to the shared encoder loop.
-    if (dataLoc == sol::DataLocation::Memory ||
-        dataLoc == sol::DataLocation::CallData)
+    // Memory arrays are traversed linearly, one loaded word per element.
+    if (dataLoc == sol::DataLocation::Memory)
       return emitArrayElementEncodingLoop(
           thirtyTwo, [&](Location loc, Value iSrcAddr) {
             return genLoad(iSrcAddr, dataLoc, loc);
           });
+
+    // Calldata array traversal is layout-dependent.
+    if (dataLoc == sol::DataLocation::CallData) {
+      // Dynamic elements keep offset-based handling (load offset from head).
+      if (sol::hasDynamicallySizedElt(eltTy))
+        return emitArrayElementEncodingLoop(
+            thirtyTwo, [&](Location loc, Value iSrcAddr) {
+              // Each fixed-array head slot stores a relative calldata offset,
+              // so resolve it against the array head before recursing.
+              return genCalldataAccessRef(*this, b, loc, eltTy, srcArrAddr,
+                                          iSrcAddr);
+            });
+
+      // Static aggregate/non-pointer-ref elements in calldata are forwarded by
+      // element head address and advanced by calldata head size.
+      if (sol::isNonPtrRefType(eltTy))
+        return emitArrayElementEncodingLoop(
+            bExt.genI256Const(getCallDataHeadSize(eltTy)),
+            [&](Location, Value iSrcAddr) { return iSrcAddr; });
+
+      // Scalar-like calldata elements are loaded one word per step with
+      // +32-byte source progression.
+      return emitArrayElementEncodingLoop(
+          thirtyTwo, [&](Location loc, Value iSrcAddr) {
+            return genLoad(iSrcAddr, dataLoc, loc);
+          });
+    }
 
     // All remaining array sources here are storage-backed.
     assert(dataLoc == sol::DataLocation::Storage &&
@@ -2041,13 +2101,10 @@ Value evm::Builder::genABITupleEncoding(
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
     // If the struct itself is emitted into tail, initialize the struct-local
     // tail to just past its ABI head.
-    if (dstAddrInTail) {
-      unsigned structHeadSize = 0;
-      for (Type memTy : structTy.getMemberTypes())
-        structHeadSize += getCallDataHeadSize(memTy);
-      tailAddr = b.create<arith::AddIOp>(loc, dstAddr,
-                                         bExt.genI256Const(structHeadSize));
-    }
+    if (dstAddrInTail)
+      tailAddr = b.create<arith::AddIOp>(
+          loc, dstAddr,
+          bExt.genI256Const(getStructCalldataEncodedTailSize(structTy)));
 
     auto dataLoc = structTy.getDataLocation();
     std::unique_ptr<StructEncodeMemberReader> reader;
@@ -2542,16 +2599,13 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
             dataLoc == sol::DataLocation::Memory) &&
            "Unexpected struct data location");
 
-    unsigned structHeadSize = 0;
-    for (Type memTy : structTy.getMemberTypes())
-      structHeadSize += getCallDataHeadSize(memTy);
-
     std::string const &headTooShortMsg =
         dataLoc == sol::DataLocation::CallData
             ? "ABI decoding: struct calldata too short"
             : "ABI decoding: struct data too short";
-    Value srcEnd =
-        b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(structHeadSize));
+    Value srcEnd = b.create<arith::AddIOp>(
+        loc, addr,
+        bExt.genI256Const(getStructCalldataEncodedTailSize(structTy)));
     genRevertIfPastTupleEnd(srcEnd, headTooShortMsg);
 
     // Keep calldata structs as calldata pointers.
