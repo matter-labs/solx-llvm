@@ -1478,7 +1478,8 @@ void evm::Builder::genResizeDynStorageArray(Value arraySlot, Value newLen,
 
 Value evm::Builder::genCopyStringDataToMemory(Value src, Type ty,
                                               Value dstDataAddr,
-                                              std::optional<Location> locArg) {
+                                              std::optional<Location> locArg,
+                                              bool withCleanup) {
   Location loc = locArg ? *locArg : defLoc;
   sol::DataLocation srcDataLoc = sol::getDataLocation(ty);
   if (srcDataLoc == sol::DataLocation::Storage) {
@@ -1497,6 +1498,14 @@ Value evm::Builder::genCopyStringDataToMemory(Value src, Type ty,
     b.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr, length);
   else
     llvm_unreachable("Unexpected data location");
+
+  if (withCleanup) {
+    // Canonicalize trailing bytes after variable-length payload copies by
+    // clearing the word at dst + length.
+    mlir::solgen::BuilderExt bExt(b, loc);
+    Value cleanupAddr = b.create<arith::AddIOp>(loc, dstDataAddr, length);
+    b.create<yul::MStoreOp>(loc, cleanupAddr, bExt.genI256Const(0, loc));
+  }
 
   return length;
 }
@@ -2186,7 +2195,8 @@ Value evm::Builder::genABITupleEncoding(
         b.create<arith::AddIOp>(loc, tailAddr, bExt.genI256Const(32));
 
     // Generate the data copy.
-    Value size = genCopyStringDataToMemory(src, ty, tailDataAddr, loc);
+    Value size = genCopyStringDataToMemory(src, ty, tailDataAddr, loc,
+                                           /*withCleanup=*/true);
     // Generate the length field copy.
     b.create<yul::MStoreOp>(loc, tailAddr, size);
     return b.create<arith::AddIOp>(loc, tailDataAddr,
@@ -2306,7 +2316,8 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
   // String type.
   if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
-    Value dataLen = genCopyStringDataToMemory(val, ty, addr, loc);
+    Value dataLen =
+        genCopyStringDataToMemory(val, ty, addr, loc, /*withCleanup=*/true);
     return b.create<arith::AddIOp>(loc, addr, dataLen);
   }
 

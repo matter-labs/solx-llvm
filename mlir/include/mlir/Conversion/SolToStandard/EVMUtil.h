@@ -258,9 +258,13 @@ public:
   /// Copies string data from \p src (any data location encoded in \p ty) into
   /// the already-allocated memory area \p dstDataAddr (the address past the
   /// length word). Does not write the length word. Returns the byte length.
-  mlir::Value genCopyStringDataToMemory(
-      mlir::Value src, mlir::Type ty, mlir::Value dstDataAddr,
-      std::optional<mlir::Location> locArg = std::nullopt);
+  /// When \p withCleanup is true, emits a trailing zero-word cleanup store at
+  /// dstDataAddr + length.
+  mlir::Value
+  genCopyStringDataToMemory(mlir::Value src, mlir::Type ty,
+                            mlir::Value dstDataAddr,
+                            std::optional<mlir::Location> locArg = std::nullopt,
+                            bool withCleanup = false);
 
   /// Zeroes storage elements [\p startIdx, \p endIdx) of the storage array
   /// \p arrTy at \p arraySlot.  For a dynamic array, \p arraySlot is the
