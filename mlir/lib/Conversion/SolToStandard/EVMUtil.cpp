@@ -482,6 +482,86 @@ bool canFastCopyCalldataArray(Type eltTy) {
   auto bytesTy = dyn_cast<sol::BytesType>(eltTy);
   return bytesTy && bytesTy.getSize() == 32;
 }
+
+// Centralizes common ABI decode bounds checks and the canonical diagnostic
+// messages used when those checks fail.
+struct ABIDecodeGuards {
+  static constexpr char const *kInvalidArrayOffset =
+      "ABI decoding: invalid calldata array offset";
+  static constexpr char const *kInvalidArrayLength =
+      "ABI decoding: invalid calldata array length";
+  static constexpr char const *kInvalidArrayStride =
+      "ABI decoding: invalid calldata array stride";
+  static constexpr char const *kInvalidByteArrayLength =
+      "ABI decoding: invalid byte array length";
+  static constexpr char const *kInvalidTupleOffset =
+      "ABI decoding: invalid tuple offset";
+  static constexpr char const *kInvalidStructOffset =
+      "ABI decoding: invalid struct offset";
+  static constexpr char const *kStructCalldataTooShort =
+      "ABI decoding: struct calldata too short";
+  static constexpr char const *kStructDataTooShort =
+      "ABI decoding: struct data too short";
+
+  evm::Builder &evmB;
+  OpBuilder &b;
+  Location loc;
+  Value tupleEnd;
+  mlir::solgen::BuilderExt bExt;
+
+  ABIDecodeGuards(evm::Builder &evmB, OpBuilder &b, Location loc,
+                  Value tupleEnd)
+      : evmB(evmB), b(b), loc(loc), tupleEnd(tupleEnd), bExt(b, loc) {}
+
+  // Ensures the length/offset word at a dynamic tail address can be loaded.
+  void requireArrayOffsetInBounds(Value addr) {
+    Value lastByte = b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(31));
+    Value invalid = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
+                                            lastByte, tupleEnd);
+    evmB.genRevertWithMsg(invalid, kInvalidArrayOffset, loc);
+  }
+
+  // ABI offsets and lengths are rejected when they exceed the uint64 range
+  // used by the lowering and runtime helpers.
+  void requireUint64(Value value, char const *msg) {
+    Value invalid = b.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ugt, value,
+        bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
+    evmB.genRevertWithMsg(invalid, msg, loc);
+  }
+
+  // Validates that a computed end address stays within the tuple boundary.
+  void requireEndInBounds(Value endAddr, char const *msg) {
+    Value invalid = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt,
+                                            endAddr, tupleEnd);
+    evmB.genRevertWithMsg(invalid, msg, loc);
+  }
+
+  // Fixed arrays are ABI-laid out inline, so their full head span must fit.
+  void requireFixedArraySpan(Value baseAddr, sol::ArrayType arrTy) {
+    Value endAddr = b.create<arith::AddIOp>(
+        loc, baseAddr,
+        bExt.genI256Const(arrTy.getSize() *
+                          evm::getCallDataHeadSize(arrTy.getEltType())));
+    requireEndInBounds(endAddr, kInvalidArrayStride);
+  }
+
+  // Dynamic arrays use element head stride to determine how much payload is
+  // addressable from the start of the dynamic data region.
+  void requireDynamicArraySpan(Value dataAddr, Value size, Type eltTy) {
+    Value spanBytes = b.create<arith::MulIOp>(
+        loc, size, bExt.genI256Const(evm::getCallDataHeadSize(eltTy)));
+    Value endAddr = b.create<arith::AddIOp>(loc, dataAddr, spanBytes);
+    requireEndInBounds(endAddr, kInvalidArrayStride);
+  }
+
+  // Struct head diagnostics differ only by whether the source is calldata or
+  // memory, so the selection is centralized here.
+  char const *getStructHeadTooShortMsg(sol::DataLocation dataLoc) const {
+    return dataLoc == sol::DataLocation::CallData ? kStructCalldataTooShort
+                                                  : kStructDataTooShort;
+  }
+};
 } // namespace
 
 unsigned evm::getAlignment(evm::AddrSpace addrSpace) {
@@ -1974,9 +2054,20 @@ Value evm::Builder::genABITupleEncoding(
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
     Value thirtyTwo = bExt.genI256Const(32);
     Value dstArrAddr, srcArrAddr, size;
+    Type eltTy = arrTy.getEltType();
+    auto dataLoc = arrTy.getDataLocation();
     if (arrTy.isDynSized()) {
       // Generate the size store.
       Value i256Size = genDynSize(src, arrTy, loc);
+      if (dataLoc == sol::DataLocation::CallData &&
+          canFastCopyCalldataArray(eltTy)) {
+        unsigned stride = getCallDataHeadSize(eltTy);
+        APInt maxLength = APInt::getAllOnes(256).udiv(APInt(256, stride));
+        Value tooLongCond =
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, i256Size,
+                                    bExt.genI256Const(maxLength));
+        genRevertWithMsg(tooLongCond, "ABI encoding: array data too long", loc);
+      }
       assert(dstAddr == tailAddr);
       if (includeLengthPrefix)
         b.create<yul::MStoreOp>(loc, dstAddr, i256Size);
@@ -1989,8 +2080,7 @@ Value evm::Builder::genABITupleEncoding(
 
       // Generate the tail address update.
       Value sizeInBytes = b.create<arith::MulIOp>(
-          loc, i256Size,
-          bExt.genI256Const(getCallDataHeadSize(arrTy.getEltType())));
+          loc, i256Size, bExt.genI256Const(getCallDataHeadSize(eltTy)));
       tailAddr = b.create<arith::AddIOp>(loc, dstArrAddr, sizeInBytes);
     } else {
       size = bExt.genIdxConst(arrTy.getSize());
@@ -2001,15 +2091,12 @@ Value evm::Builder::genABITupleEncoding(
         // Generate the tail address update.
         Value i256Size = bExt.genI256Const(arrTy.getSize());
         Value sizeInBytes = b.create<arith::MulIOp>(
-            loc, i256Size,
-            bExt.genI256Const(getCallDataHeadSize(arrTy.getEltType())));
+            loc, i256Size, bExt.genI256Const(getCallDataHeadSize(eltTy)));
         tailAddr = b.create<arith::AddIOp>(loc, dstArrAddr, sizeInBytes);
       }
     }
 
-    Type eltTy = arrTy.getEltType();
     Value dstStride = bExt.genI256Const(getCallDataHeadSize(eltTy));
-    auto dataLoc = arrTy.getDataLocation();
     auto emitArrayElementEncodingLoop = [&](Value srcStride,
                                             auto &&materializeSrcVal) {
       auto forOp = b.create<scf::ForOp>(
@@ -2363,6 +2450,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
                                         std::optional<mlir::Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
+  ABIDecodeGuards guards(*this, b, loc, tupleEnd);
 
   // TODO: Generate assertions for checking if addresses of reference types is
   // within the calldata.
@@ -2371,32 +2459,6 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
     if (fromMem)
       return b.create<yul::MLoadOp>(loc, addr);
     return b.create<yul::CallDataLoadOp>(loc, addr);
-  };
-
-  // Revert if reading one ABI word (32 bytes) at 'addr' would exceed tuple
-  // bounds.
-  auto genRevertIfTupleWordOutOfBounds = [&](std::string const &revertMsg) {
-    auto invalidRangeCond = b.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::sge,
-        b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(31)), tupleEnd);
-    genRevertWithMsg(invalidRangeCond, revertMsg, loc);
-  };
-
-  // Revert if offset is above uint64 max (0xffffffffffffffff).
-  auto genRevertIfOffsetTooLarge = [&](Value offset,
-                                       std::string const &revertMsg) {
-    auto invalidOffsetCond = b.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::ugt, offset,
-        bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
-    genRevertWithMsg(invalidOffsetCond, revertMsg, loc);
-  };
-
-  // Revert if a value is past tuple end.
-  auto genRevertIfPastTupleEnd = [&](Value value,
-                                     std::string const &revertMsg) {
-    auto invalidRangeCond = b.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::ugt, value, tupleEnd);
-    genRevertWithMsg(invalidRangeCond, revertMsg, loc);
   };
 
   // Integer type
@@ -2421,12 +2483,12 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
   // Enum type
   if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
     Value arg = genLoad(addr);
-    // Generate a panic check that checks if the decoded value is within in the
+    // Generate a revert check that checks if the decoded value is within the
     // range of the enum type.
-    auto panicCond =
+    auto revertCond =
         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, arg,
                                 bExt.genI256Const(enumTy.getMax()));
-    genPanic(mlir::evm::PanicCode::EnumConversionError, panicCond, loc);
+    genRevert(revertCond, loc);
     return arg;
   }
 
@@ -2444,29 +2506,31 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
 
   // Array type
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
-    if (arrTy.getDataLocation() == sol::DataLocation::CallData &&
-        !arrTy.isDynSized())
-      return addr;
+    Value thirtyTwo = bExt.genI256Const(32);
+    Type eltTy = arrTy.getEltType();
 
-    genRevertIfTupleWordOutOfBounds(
-        "ABI decoding: invalid calldata array offset");
+    if (arrTy.getDataLocation() == sol::DataLocation::CallData) {
+      if (!arrTy.isDynSized()) {
+        guards.requireFixedArraySpan(addr, arrTy);
+        return addr;
+      }
+
+      guards.requireArrayOffsetInBounds(addr);
+
+      Value i256Size = genLoad(addr);
+      Value srcAddr = b.create<arith::AddIOp>(loc, addr, thirtyTwo);
+      guards.requireUint64(i256Size, ABIDecodeGuards::kInvalidArrayLength);
+      guards.requireDynamicArraySpan(srcAddr, i256Size, eltTy);
+      return bExt.genLLVMStruct({srcAddr, i256Size});
+    }
+
+    guards.requireArrayOffsetInBounds(addr);
 
     Value dstAddr, srcAddr, size, ret;
-    Value thirtyTwo = bExt.genI256Const(32);
     if (arrTy.isDynSized()) {
       Value i256Size = genLoad(addr);
       srcAddr = b.create<arith::AddIOp>(loc, addr, thirtyTwo);
-
-      // Generate an assertion that checks the size.
-      auto scaledSize = b.create<arith::MulIOp>(
-          loc, i256Size,
-          bExt.genI256Const(getCallDataHeadSize(arrTy.getEltType())));
-      auto endAddr = b.create<arith::AddIOp>(loc, srcAddr, scaledSize);
-      genRevertIfPastTupleEnd(endAddr,
-                              "ABI decoding: invalid calldata array stride");
-
-      if (arrTy.getDataLocation() == sol::DataLocation::CallData)
-        return bExt.genLLVMStruct({srcAddr, i256Size});
+      guards.requireDynamicArraySpan(srcAddr, i256Size, eltTy);
 
       dstAddr = genMemAllocForDynArray(
           i256Size, b.create<arith::MulIOp>(loc, i256Size, thirtyTwo), loc,
@@ -2480,13 +2544,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
       ret = dstAddr;
       srcAddr = addr;
       size = bExt.genIdxConst(arrTy.getSize());
-
-      auto fixedSize =
-          arrTy.getSize() * getCallDataHeadSize(arrTy.getEltType());
-      Value srcEnd =
-          b.create<arith::AddIOp>(loc, srcAddr, bExt.genI256Const(fixedSize));
-      genRevertIfPastTupleEnd(srcEnd,
-                              "ABI decoding: invalid calldata array stride");
+      guards.requireFixedArraySpan(srcAddr, arrTy);
     }
 
     b.create<scf::ForOp>(
@@ -2498,23 +2556,23 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
         [&](OpBuilder &b, Location loc, Value indVar, ValueRange initArgs) {
           Value iDstAddr = initArgs[0];
           Value iSrcAddr = initArgs[1];
-          if (sol::hasDynamicallySizedElt(arrTy.getEltType())) {
+
+          if (sol::hasDynamicallySizedElt(eltTy)) {
             Value innerOffset = genLoad(iSrcAddr);
-            genRevertIfOffsetTooLarge(
-                innerOffset, "ABI decoding: invalid calldata array offset");
+            guards.requireUint64(innerOffset,
+                                 ABIDecodeGuards::kInvalidArrayOffset);
 
             // The elements are offset wrt to the start of this array (after the
             // size field if dynamic) that contain the inner element.
             Value offsetFromSrcArr =
                 b.create<arith::AddIOp>(loc, srcAddr, innerOffset);
-            b.create<yul::MStoreOp>(
-                loc, iDstAddr,
-                genABITupleDecoding(arrTy.getEltType(), offsetFromSrcArr,
-                                    fromMem, tupleStart, tupleEnd, loc));
+            b.create<yul::MStoreOp>(loc, iDstAddr,
+                                    genABITupleDecoding(eltTy, offsetFromSrcArr,
+                                                        fromMem, tupleStart,
+                                                        tupleEnd, loc));
           } else {
-            auto elemVal =
-                genABITupleDecoding(arrTy.getEltType(), iSrcAddr, fromMem,
-                                    tupleStart, tupleEnd, loc);
+            auto elemVal = genABITupleDecoding(eltTy, iSrcAddr, fromMem,
+                                               tupleStart, tupleEnd, loc);
             auto intTy = dyn_cast<IntegerType>(elemVal.getType());
 
             // If the element type is an integer smaller than 256 bits, we need
@@ -2526,8 +2584,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
             b.create<yul::MStoreOp>(loc, iDstAddr, elemVal);
           }
 
-          Value srcStride =
-              bExt.genI256Const(getCallDataHeadSize(arrTy.getEltType()));
+          Value srcStride = bExt.genI256Const(getCallDataHeadSize(eltTy));
           b.create<scf::YieldOp>(
               loc,
               ValueRange{
@@ -2569,15 +2626,15 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
 
   // String type
   if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
-    genRevertIfTupleWordOutOfBounds(
-        "ABI decoding: invalid calldata array offset");
+    guards.requireArrayOffsetInBounds(addr);
 
     Value tailAddr = addr;
     Value sizeInBytes = genLoad(tailAddr);
     Value thirtyTwo = bExt.genI256Const(32);
     Value srcDataAddr = b.create<arith::AddIOp>(loc, tailAddr, thirtyTwo);
     Value endAddr = b.create<arith::AddIOp>(loc, srcDataAddr, sizeInBytes);
-    genRevertIfPastTupleEnd(endAddr, "ABI decoding: invalid byte array length");
+    guards.requireEndInBounds(endAddr,
+                              ABIDecodeGuards::kInvalidByteArrayLength);
 
     if (stringTy.getDataLocation() == sol::DataLocation::CallData)
       return bExt.genLLVMStruct({srcDataAddr, sizeInBytes});
@@ -2611,14 +2668,10 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
             dataLoc == sol::DataLocation::Memory) &&
            "Unexpected struct data location");
 
-    std::string const &headTooShortMsg =
-        dataLoc == sol::DataLocation::CallData
-            ? "ABI decoding: struct calldata too short"
-            : "ABI decoding: struct data too short";
     Value srcEnd = b.create<arith::AddIOp>(
         loc, addr,
         bExt.genI256Const(getStructCalldataEncodedTailSize(structTy)));
-    genRevertIfPastTupleEnd(srcEnd, headTooShortMsg);
+    guards.requireEndInBounds(srcEnd, guards.getStructHeadTooShortMsg(dataLoc));
 
     // Keep calldata structs as calldata pointers.
     if (dataLoc == sol::DataLocation::CallData)
@@ -2632,8 +2685,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
       Value memberVal;
       if (sol::hasDynamicallySizedElt(memTy)) {
         Value tailOffset = genLoad(srcHeadAddr);
-        genRevertIfOffsetTooLarge(tailOffset,
-                                  "ABI decoding: invalid struct offset");
+        guards.requireUint64(tailOffset, ABIDecodeGuards::kInvalidStructOffset);
 
         Value tailAddr = b.create<arith::AddIOp>(loc, addr, tailOffset);
         memberVal =
@@ -2672,6 +2724,7 @@ void evm::Builder::genABITupleDecoding(TypeRange tys, Value tupleStart,
                                        std::optional<mlir::Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
+  ABIDecodeGuards guards(*this, b, loc, tupleEnd);
 
   // TODO? {en|de}codingType() for sol dialect types.
 
@@ -2691,11 +2744,7 @@ void evm::Builder::genABITupleDecoding(TypeRange tys, Value tupleStart,
   for (Type ty : tys) {
     if (sol::hasDynamicallySizedElt(ty)) {
       Value tailOffset = genLoad(headAddr);
-      auto invalidOffsetCond = b.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::ugt, tailOffset,
-          bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
-      genRevertWithMsg(invalidOffsetCond, "ABI decoding: invalid tuple offset",
-                       loc);
+      guards.requireUint64(tailOffset, ABIDecodeGuards::kInvalidTupleOffset);
 
       Value tailAddr = b.create<arith::AddIOp>(loc, tupleStart, tailOffset);
       results.push_back(genABITupleDecoding(ty, tailAddr, fromMem, tupleStart,
