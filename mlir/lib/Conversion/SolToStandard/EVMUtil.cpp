@@ -471,6 +471,17 @@ Value emitCompactStorageArrayLoop(OpBuilder &b, Location loc, Value size,
 
   return remIf.getResult(0);
 }
+
+// Returns true when a calldata array element type can be copied directly as a
+// 32-byte word in the fast-path array copy.
+bool canFastCopyCalldataArray(Type eltTy) {
+  if (auto intTy = dyn_cast<IntegerType>(eltTy))
+    // TODO: Can we allow signed integers here as well?
+    return intTy.getWidth() == 256 && !intTy.isSigned();
+
+  auto bytesTy = dyn_cast<sol::BytesType>(eltTy);
+  return bytesTy && bytesTy.getSize() == 32;
+}
 } // namespace
 
 unsigned evm::getAlignment(evm::AddrSpace addrSpace) {
@@ -2037,6 +2048,15 @@ Value evm::Builder::genABITupleEncoding(
 
     // Calldata array traversal is layout-dependent.
     if (dataLoc == sol::DataLocation::CallData) {
+      // Copy contiguous calldata payload in one operation.
+      if (canFastCopyCalldataArray(eltTy)) {
+        Value sizeInBytes = b.create<arith::MulIOp>(
+            loc, bExt.genCastToI256(size),
+            bExt.genI256Const(getCallDataHeadSize(eltTy)));
+        b.create<yul::CallDataCopyOp>(loc, dstArrAddr, srcArrAddr, sizeInBytes);
+        return tailAddr;
+      }
+
       // Dynamic elements keep offset-based handling (load offset from head).
       if (sol::hasDynamicallySizedElt(eltTy))
         return emitArrayElementEncodingLoop(
