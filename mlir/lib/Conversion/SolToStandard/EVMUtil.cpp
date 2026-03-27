@@ -1911,7 +1911,7 @@ void evm::Builder::genABITupleSizeAssert(TypeRange tys, Value tupleSize,
 Value evm::Builder::genABITupleEncoding(
     Type ty, Value src, Value dstAddr, bool dstAddrInTail, Value tupleStart,
     Value tailAddr, std::optional<Location> locArg,
-    std::optional<sol::DataLocation> srcDataLoc) {
+    std::optional<sol::DataLocation> srcDataLoc, bool includeLengthPrefix) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
@@ -1958,10 +1958,13 @@ Value evm::Builder::genABITupleEncoding(
       // Generate the size store.
       Value i256Size = genDynSize(src, arrTy, loc);
       assert(dstAddr == tailAddr);
-      b.create<yul::MStoreOp>(loc, dstAddr, i256Size);
+      if (includeLengthPrefix)
+        b.create<yul::MStoreOp>(loc, dstAddr, i256Size);
 
       size = bExt.genCastToIdx(i256Size);
-      dstArrAddr = b.create<arith::AddIOp>(loc, dstAddr, thirtyTwo);
+      dstArrAddr = includeLengthPrefix
+                       ? b.create<arith::AddIOp>(loc, dstAddr, thirtyTwo)
+                       : dstAddr;
       srcArrAddr = genDataAddrPtr(src, arrTy, loc);
 
       // Generate the tail address update.
@@ -2289,48 +2292,26 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
   // Array type.
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
-    if (arrTy.getDataLocation() == sol::DataLocation::Storage)
-      llvm_unreachable("NYI");
+    auto isValidPackedArrayElementType = [&](Type eltTy) {
+      while (auto nestedArrTy = dyn_cast<sol::ArrayType>(eltTy)) {
+        if (nestedArrTy.isDynSized())
+          return false;
+        eltTy = nestedArrTy.getEltType();
+      }
+      return isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
+             isa<sol::BytesType>(eltTy) || isa<sol::ExtFuncRefType>(eltTy) ||
+             sol::isAddressLikeType(eltTy);
+    };
 
-    Value size;
-    Value srcArrAddr;
-    if (arrTy.isDynSized()) {
-      Value dynSize = genDynSize(val, arrTy, loc);
-      size = bExt.genCastToIdx(dynSize);
-      srcArrAddr = genDataAddrPtr(val, arrTy, loc);
-    } else {
-      size = bExt.genIdxConst(arrTy.getSize());
-      srcArrAddr = val;
-    }
+    // TODO: Move packed array element type validation to a verifier.
+    if (!isValidPackedArrayElementType(arrTy.getEltType()))
+      llvm_unreachable(
+          "Only scalar types and fixed nested arrays can be packed");
 
-    auto forOp = b.create<scf::ForOp>(
-        loc, /*lowerBound=*/bExt.genIdxConst(0),
-        /*upperBound=*/size,
-        /*step=*/bExt.genIdxConst(1),
-        /*initArgs=*/ValueRange{addr, srcArrAddr},
-        /*builder=*/
-        [&](OpBuilder &b, Location loc, Value indVar, ValueRange initArgs) {
-          Value iDstAddr = initArgs[0];
-          Value iSrcAddr = initArgs[1];
-          Type eltTy = arrTy.getEltType();
-          sol::DataLocation dataLoc = arrTy.getDataLocation();
-
-          Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
-          if (!isa<IntegerType>(eltTy) && !isa<sol::EnumType>(eltTy) &&
-              !isa<sol::BytesType>(eltTy) && !isa<sol::ExtFuncRefType>(eltTy) &&
-              !sol::isAddressLikeType(eltTy))
-            llvm_unreachable("Only integer, enum, address-like, bytes, and "
-                             "ext_func_ref types can be packed");
-
-          srcVal = normalizeABIScalarForEncoding(eltTy, srcVal, loc, dataLoc);
-          b.create<yul::MStoreOp>(loc, iDstAddr, srcVal);
-
-          Value stride = bExt.genI256Const(getCallDataHeadSize(eltTy));
-          Value nextDstAddr = b.create<arith::AddIOp>(loc, iDstAddr, stride);
-          Value nextSrcAddr = b.create<arith::AddIOp>(loc, iSrcAddr, stride);
-          b.create<scf::YieldOp>(loc, ValueRange{nextDstAddr, nextSrcAddr});
-        });
-    return forOp.getResult(0);
+    return genABITupleEncoding(
+        arrTy, val, addr, /*dstAddrInTail=*/true, /*tupleStart=*/addr,
+        /*tailAddr=*/addr, loc, /*srcDataLoc=*/std::nullopt,
+        /*includeLengthPrefix=*/false);
   }
 
   llvm_unreachable("NYI: packed encoding of this type");

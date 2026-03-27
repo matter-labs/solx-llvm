@@ -315,11 +315,13 @@ public:
                              std::optional<Location> locArg = std::nullopt);
 
   /// Generates the tuple encoder code as per the ABI and return the new tail
-  /// address.
+  /// address. When `includeLengthPrefix` is false, the encoding does not
+  /// include the length word for dynamic arrays (used by the packed encoding).
   Value genABITupleEncoding(
       Type ty, Value src, Value dstAddr, bool dstAddrInTail, Value tupleStart,
       Value tailAddr, std::optional<Location> locArg = std::nullopt,
-      std::optional<sol::DataLocation> srcDataLoc = std::nullopt);
+      std::optional<sol::DataLocation> srcDataLoc = std::nullopt,
+      bool includeLengthPrefix = true);
 
   /// Generates the tuple encoder code as per the ABI and returns the address at
   /// the end of the tuple.
