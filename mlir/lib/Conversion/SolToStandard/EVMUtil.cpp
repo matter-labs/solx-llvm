@@ -18,6 +18,7 @@
 #include "mlir/Conversion/SolToStandard/EVMConstants.h"
 #include "mlir/Conversion/SolToStandard/Util.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
@@ -215,6 +216,212 @@ struct StructEncodeMemberReaderStorage final : StructEncodeMemberReader {
   // Storage traversal is indexed by member number and precomputed offsets.
   void advance(uint64_t) override {}
 };
+
+// Copies elements from source (storage, calldata, or memory)
+// to destination memory.
+// Pseudo C:
+//   dst = dstStart;
+//   src = srcStart;
+//   for (size_t i = 0; i < size; ++i) {
+//     emitElement(src, dst);
+//     dst += dstStride;
+//     src += srcStride;
+//   }
+template <typename EmitElementFuncT>
+Value emitLinearArrayLoop(OpBuilder &b, Location loc, Value size,
+                          Value dstStart, Value srcStart, Value dstStride,
+                          Value srcStride, EmitElementFuncT &&emitElement) {
+  mlir::solgen::BuilderExt bExt(b, loc);
+  auto forOp = b.create<scf::ForOp>(
+      loc, /*lowerBound=*/bExt.genIdxConst(0),
+      /*upperBound=*/size,
+      /*step=*/bExt.genIdxConst(1),
+      /*initArgs=*/ValueRange{dstStart, srcStart},
+      /*builder=*/
+      [&](OpBuilder &b, Location loc, Value, ValueRange initArgs) {
+        Value iDstAddr = initArgs[0];
+        Value iSrcAddr = initArgs[1];
+
+        emitElement(b, loc, iSrcAddr, iDstAddr);
+
+        Value nextDstAddr = b.create<arith::AddIOp>(loc, iDstAddr, dstStride);
+        Value nextSrcAddr = b.create<arith::AddIOp>(loc, iSrcAddr, srcStride);
+        b.create<scf::YieldOp>(loc, ValueRange{nextDstAddr, nextSrcAddr});
+      });
+  return forOp.getResult(0);
+}
+
+// Copies packed elements from source storage slots to destination memory.
+// Pseudo C:
+//   const size_t itemsPerSlot = 32 / eltByteSize;
+//   const size_t fullLoopUpperBound =
+//       (size >= itemsPerSlot) ? (size - (itemsPerSlot - 1)) : 0;
+//   dst = dstStart;
+//   srcSlot = srcStart;
+//   itemCounter = 0;
+//
+//   // Full slot loop.
+//   for (; itemCounter < fullLoopUpperBound; itemCounter += itemsPerSlot) {
+//     slot = sload(srcSlot);
+//     for (size_t packedIdx = 0, shiftBits = 0; packedIdx < itemsPerSlot;
+//          ++packedIdx, shiftBits += eltByteSize * 8) {
+//       emitElement(slot, shiftBits, dst);
+//       dst += dstStride;
+//     }
+//     ++srcSlot;
+//   }
+//
+//   if (itemCounter < size) {
+//     slot = sload(srcSlot);
+//
+//     // Remainder loop.
+//     for (size_t remIdx = itemCounter, shiftBits = 0; remIdx < size;
+//          ++remIdx, shiftBits += eltByteSize * 8) {
+//       emitElement(slot, shiftBits, dst);
+//       dst += dstStride;
+//     }
+//   }
+template <typename EmitElementFromSlotFuncT>
+Value emitCompactStorageArrayLoop(OpBuilder &b, Location loc, Value size,
+                                  Value dstStart, Value srcStart,
+                                  Value dstStride, unsigned eltByteSize,
+                                  bool isDynSized,
+                                  EmitElementFromSlotFuncT &&emitElement) {
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  unsigned itemsPerSlot = 32 / eltByteSize;
+  assert(itemsPerSlot > 1 && "Expected at least two packed items per slot");
+
+  // Reused constants.
+  Value zeroIdx = bExt.genIdxConst(0);
+  Value oneIdx = bExt.genIdxConst(1);
+  Value itemsPerSlotIdx = bExt.genIdxConst(itemsPerSlot);
+  Value zeroI256 = bExt.genI256Const(0);
+
+  // TODO: If we see some perf regressions, we can change this computation, as
+  // LLVM will produce llvm.usub.sat.i256 for dynamic arrays which is
+  // not efficient.
+  auto hasFullSlots = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge,
+                                              size, itemsPerSlotIdx);
+  Value fullLoopUpperBound = b.create<arith::SelectOp>(
+      loc, hasFullSlots,
+      b.create<arith::SubIOp>(loc, size, bExt.genIdxConst(itemsPerSlot - 1)),
+      zeroIdx);
+
+  // Add loop annotation to fully unroll.
+  auto fullUnroll = LLVM::LoopUnrollAttr::get(
+      b.getContext(), /*disable=*/{}, /*count=*/{},
+      /*runtimeDisable=*/{}, /*full=*/b.getBoolAttr(true),
+      /*followupUnrolled=*/{}, /*followupRemainder=*/{},
+      /*followupAll=*/{});
+  auto fullUnrollLoopAnnotation = LLVM::LoopAnnotationAttr::get(
+      b.getContext(), /*disableNonforced=*/{}, /*vectorize=*/{},
+      /*interleave=*/{}, /*unroll=*/fullUnroll,
+      /*unrollAndJam=*/{}, /*licm=*/{}, /*distribute=*/{},
+      /*pipeline=*/{}, /*peeled=*/{}, /*unswitch=*/{},
+      /*mustProgress=*/{}, /*isVectorized=*/{}, /*startLoc=*/{},
+      /*endLoc=*/{}, /*parallelAccesses=*/{});
+
+  // Full-slot loop.
+  auto fullSlotForOp = b.create<scf::ForOp>(
+      loc, /*lowerBound=*/zeroIdx, /*upperBound=*/fullLoopUpperBound,
+      /*step=*/itemsPerSlotIdx,
+      /*initArgs=*/ValueRange{dstStart, srcStart, zeroIdx},
+      [&](OpBuilder &b, Location loc, Value, ValueRange initArgs) {
+        Value iDstAddr = initArgs[0];
+        Value iSrcSlot = initArgs[1];
+        Value iItemCounter = initArgs[2];
+
+        // Load the slot once and extract all packed elements from it.
+        Value slotVal = b.create<yul::SLoadOp>(loc, iSrcSlot);
+        auto perSlotForOp = b.create<scf::ForOp>(
+            loc, /*lowerBound=*/zeroIdx, /*upperBound=*/itemsPerSlotIdx,
+            /*step=*/oneIdx, /*initArgs=*/ValueRange{iDstAddr, zeroI256},
+            [&](OpBuilder &b, Location loc, Value, ValueRange perSlotArgs) {
+              Value jDstAddr = perSlotArgs[0];
+              Value jShiftBits = perSlotArgs[1];
+
+              emitElement(b, loc, slotVal, jShiftBits, jDstAddr);
+
+              // Advance destination and extraction offset for next item
+              // in this same slot.
+              Value nextDstAddr =
+                  b.create<arith::AddIOp>(loc, jDstAddr, dstStride);
+              Value nextShiftBits = b.create<arith::AddIOp>(
+                  loc, jShiftBits, bExt.genI256Const(eltByteSize * 8));
+              b.create<scf::YieldOp>(loc,
+                                     ValueRange{nextDstAddr, nextShiftBits});
+            });
+
+        // TODO: We can enable this only for -O3, and disable for rest
+        // of the optimization levels to reduce code size.
+        perSlotForOp->setAttr("loop_annotation", fullUnrollLoopAnnotation);
+
+        // After consuming one full slot, move to the next storage slot
+        // and advance the emitted item counter by itemsPerSlot.
+        Value nextSrcSlot =
+            b.create<arith::AddIOp>(loc, iSrcSlot, bExt.genI256Const(1));
+        Value nextItemCounter =
+            b.create<arith::AddIOp>(loc, iItemCounter, itemsPerSlotIdx);
+        b.create<scf::YieldOp>(loc, ValueRange{perSlotForOp.getResult(0),
+                                               nextSrcSlot, nextItemCounter});
+      });
+
+  Value dstAfterFullSlots = fullSlotForOp.getResult(0);
+  Value srcSlotAfterFullSlots = fullSlotForOp.getResult(1);
+  Value itemCounterAfterFullSlots = fullSlotForOp.getResult(2);
+
+  // Remainder phase handles tail elements in a partially-filled slot, if any.
+  // It reuses one final slot load and emits only the still-missing items.
+  auto hasRem = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
+                                        itemCounterAfterFullSlots, size);
+  auto remIf =
+      b.create<scf::IfOp>(loc, TypeRange{dstAfterFullSlots.getType()}, hasRem,
+                          /*withElseRegion=*/true);
+  {
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(&remIf.getThenRegion().front());
+
+    // Load exactly the slot that contains the remaining tail elements.
+    Value slotVal = b.create<yul::SLoadOp>(loc, srcSlotAfterFullSlots);
+
+    // Remainder loop.
+    // TODO: For dynamic arrays, solc unrolls this loop manually with
+    // conditions. If we see some perf regressions, we can do the same.
+    auto remForOp = b.create<scf::ForOp>(
+        loc, /*lowerBound=*/itemCounterAfterFullSlots,
+        /*upperBound=*/size, /*step=*/oneIdx,
+        /*initArgs=*/ValueRange{dstAfterFullSlots, zeroI256},
+        [&](OpBuilder &b, Location loc, Value, ValueRange remArgs) {
+          Value remDstAddr = remArgs[0];
+          Value remShiftBits = remArgs[1];
+
+          emitElement(b, loc, slotVal, remShiftBits, remDstAddr);
+
+          // Advance to next output element and next packed field in the
+          // same loaded remainder slot.
+          Value nextDstAddr =
+              b.create<arith::AddIOp>(loc, remDstAddr, dstStride);
+          Value nextShiftBits = b.create<arith::AddIOp>(
+              loc, remShiftBits, bExt.genI256Const(eltByteSize * 8));
+          b.create<scf::YieldOp>(loc, ValueRange{nextDstAddr, nextShiftBits});
+        });
+
+    // TODO: We can enable this only for -O3, and disable for rest
+    // of the optimization levels to reduce code size.
+    if (!isDynSized)
+      remForOp->setAttr("loop_annotation", fullUnrollLoopAnnotation);
+
+    b.create<scf::YieldOp>(loc, remForOp.getResult(0));
+  }
+  {
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(&remIf.getElseRegion().front());
+    b.create<scf::YieldOp>(loc, dstAfterFullSlots);
+  }
+
+  return remIf.getResult(0);
+}
 } // namespace
 
 unsigned evm::getAlignment(evm::AddrSpace addrSpace) {
@@ -1728,56 +1935,106 @@ Value evm::Builder::genABITupleEncoding(
       }
     }
 
-    // Generate a loop to copy the array.
-    auto forOp = b.create<scf::ForOp>(
-        loc, /*lowerBound=*/bExt.genIdxConst(0),
-        /*upperBound=*/size,
-        /*step=*/bExt.genIdxConst(1),
-        /*initArgs=*/ValueRange{dstArrAddr, srcArrAddr, tailAddr},
-        /*builder=*/
-        [&](OpBuilder &b, Location loc, Value indVar, ValueRange initArgs) {
-          Value iDstAddr = initArgs[0];
-          Value iSrcAddr = initArgs[1];
-          Value iTailAddr = initArgs[2];
+    Type eltTy = arrTy.getEltType();
+    Value dstStride = bExt.genI256Const(getCallDataHeadSize(eltTy));
+    auto dataLoc = arrTy.getDataLocation();
+    auto emitArrayElementEncodingLoop = [&](Value srcStride,
+                                            auto &&materializeSrcVal) {
+      auto forOp = b.create<scf::ForOp>(
+          loc, /*lowerBound=*/bExt.genIdxConst(0),
+          /*upperBound=*/size,
+          /*step=*/bExt.genIdxConst(1),
+          /*initArgs=*/ValueRange{dstArrAddr, srcArrAddr, tailAddr},
+          /*builder=*/
+          [&](OpBuilder &b, Location loc, Value, ValueRange initArgs) {
+            Value iDstAddr = initArgs[0];
+            Value iSrcAddr = initArgs[1];
+            Value iTailAddr = initArgs[2];
 
-          Value srcVal = genLoad(iSrcAddr, arrTy.getDataLocation(), loc);
-          Value nextTailAddr;
-          if (sol::hasDynamicallySizedElt(arrTy.getEltType())) {
-            if (arrTy.getDataLocation() == sol::DataLocation::CallData) {
-              // Multi-dimensional dynamic arrays in calldata tracks inner
-              // allocations using offsets wrt to the start array. Here `srcVal`
-              // (on the rhs) is that offset.
-              Value innerAddr =
-                  b.create<arith::AddIOp>(loc, srcArrAddr, srcVal);
-              // Construct the fat pointer.
-              Value innerSize = b.create<yul::CallDataLoadOp>(loc, innerAddr);
-              Value innerDataAddr =
-                  b.create<arith::AddIOp>(loc, innerAddr, thirtyTwo);
-              mlir::solgen::BuilderExt bExt(b, loc);
-              srcVal = bExt.genLLVMStruct({innerDataAddr, innerSize});
+            Value srcVal = materializeSrcVal(loc, iSrcAddr);
+            Value nextTailAddr;
+            if (sol::hasDynamicallySizedElt(eltTy)) {
+              if (dataLoc == sol::DataLocation::CallData) {
+                // Multi-dimensional dynamic arrays in calldata tracks inner
+                // allocations using offsets wrt to the start array. Here
+                // `srcVal` (on the rhs) is that offset.
+                Value innerAddr =
+                    b.create<arith::AddIOp>(loc, srcArrAddr, srcVal);
+                // Construct the fat pointer.
+                Value innerSize = b.create<yul::CallDataLoadOp>(loc, innerAddr);
+                Value innerDataAddr =
+                    b.create<arith::AddIOp>(loc, innerAddr, thirtyTwo);
+                mlir::solgen::BuilderExt bExt(b, loc);
+                srcVal = bExt.genLLVMStruct({innerDataAddr, innerSize});
+              }
+
+              b.create<yul::MStoreOp>(
+                  loc, iDstAddr,
+                  b.create<arith::SubIOp>(loc, iTailAddr, dstArrAddr));
+              assert(dstAddrInTail);
+              nextTailAddr =
+                  genABITupleEncoding(eltTy, srcVal, iTailAddr, dstAddrInTail,
+                                      tupleStart, iTailAddr, loc, dataLoc);
+            } else {
+              nextTailAddr =
+                  genABITupleEncoding(eltTy, srcVal, iDstAddr, dstAddrInTail,
+                                      tupleStart, iTailAddr, loc, dataLoc);
             }
 
-            b.create<yul::MStoreOp>(
-                loc, iDstAddr,
-                b.create<arith::SubIOp>(loc, iTailAddr, dstArrAddr));
-            assert(dstAddrInTail);
-            nextTailAddr = genABITupleEncoding(
-                arrTy.getEltType(), srcVal, iTailAddr, dstAddrInTail,
-                tupleStart, iTailAddr, loc, arrTy.getDataLocation());
-          } else {
-            nextTailAddr = genABITupleEncoding(
-                arrTy.getEltType(), srcVal, iDstAddr, dstAddrInTail, tupleStart,
-                iTailAddr, loc, arrTy.getDataLocation());
-          }
+            b.create<scf::YieldOp>(
+                loc,
+                ValueRange{b.create<arith::AddIOp>(loc, iDstAddr, dstStride),
+                           b.create<arith::AddIOp>(loc, iSrcAddr, srcStride),
+                           nextTailAddr});
+          });
+      return forOp.getResult(2);
+    };
 
-          Value dstStride =
-              bExt.genI256Const(getCallDataHeadSize(arrTy.getEltType()));
-          b.create<scf::YieldOp>(
-              loc, ValueRange{b.create<arith::AddIOp>(loc, iDstAddr, dstStride),
-                              b.create<arith::AddIOp>(loc, iSrcAddr, thirtyTwo),
-                              nextTailAddr});
-        });
-    return forOp.getResult(2);
+    // Memory and calldata arrays share a linear, word-strided traversal:
+    // load one element value per step and feed it to the shared encoder loop.
+    if (dataLoc == sol::DataLocation::Memory ||
+        dataLoc == sol::DataLocation::CallData)
+      return emitArrayElementEncodingLoop(
+          thirtyTwo, [&](Location loc, Value iSrcAddr) {
+            return genLoad(iSrcAddr, dataLoc, loc);
+          });
+
+    // All remaining array sources here are storage-backed.
+    assert(dataLoc == sol::DataLocation::Storage &&
+           "Expected storage data location");
+
+    // Storage arrays with reference-typed elements pass per-element storage
+    // slot addresses to recursive encoders.
+    if (sol::isNonPtrRefType(eltTy))
+      return emitArrayElementEncodingLoop(
+          bExt.genI256Const(sol::getStorageSlotCount(eltTy)),
+          [&](Location, Value iSrcAddr) { return iSrcAddr; });
+
+    if (sol::canBePacked(eltTy) && sol::getStorageByteSize(eltTy) <= 16)
+      // Storage arrays with value-typed elements.
+      emitCompactStorageArrayLoop(
+          b, loc, size, dstArrAddr, srcArrAddr, dstStride,
+          sol::getStorageByteSize(eltTy), arrTy.isDynSized(),
+          [&](OpBuilder &builder, Location loc, Value slotValue,
+              Value shiftBits, Value iDstAddr) {
+            Value shifted =
+                builder.create<arith::ShRUIOp>(loc, slotValue, shiftBits);
+            Value srcVal = genCleanupPackedStorageValue(eltTy, shifted, loc);
+            (void)genABITupleEncoding(eltTy, srcVal, iDstAddr, dstAddrInTail,
+                                      tupleStart, tailAddr, loc, dataLoc);
+          });
+    else
+      // Non-packed storage value elements are loaded linearly using slot
+      // stride.
+      emitLinearArrayLoop(
+          b, loc, size, dstArrAddr, srcArrAddr, dstStride,
+          bExt.genI256Const(sol::getStorageSlotCount(eltTy)),
+          [&](OpBuilder &, Location loc, Value iSrcAddr, Value iDstAddr) {
+            Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
+            (void)genABITupleEncoding(eltTy, srcVal, iDstAddr, dstAddrInTail,
+                                      tupleStart, tailAddr, loc, dataLoc);
+          });
+    return tailAddr;
   }
 
   // Struct type
