@@ -239,6 +239,18 @@ def Sol_EvmVersion : I32EnumAttr<"EvmVersion",
 def Sol_EvmVersionAttr : EnumAttr<Sol_Dialect, Sol_EvmVersion,
                                     "EvmVersion">;
 
+def Sol_RevertStrings :
+    I32EnumAttr<"RevertStrings", "Represents the revert string policy",
+                [I32EnumAttrCase<"Default", 0>,
+                 I32EnumAttrCase<"Strip", 1>,
+                 I32EnumAttrCase<"Debug", 2>,
+                 I32EnumAttrCase<"VerboseDebug", 3>]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = "::mlir::sol";
+}
+def Sol_RevertStringsAttr : EnumAttr<Sol_Dialect, Sol_RevertStrings,
+                                     "RevertStrings">;
+
 //===----------------------------------------------------------------------===//
 // Op classes
 //===----------------------------------------------------------------------===//

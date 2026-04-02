@@ -64,13 +64,15 @@ class Builder {
   // location, but then it becomes tricky to keep the default location behaviour
   // consistent.
 
+  ModuleOp mod;
   OpBuilder &b;
   Location defLoc;
 
 public:
-  explicit Builder(OpBuilder &b) : b(b), defLoc(b.getUnknownLoc()) {}
-
-  explicit Builder(OpBuilder &b, Location loc) : b(b), defLoc(loc) {}
+  explicit Builder(ModuleOp mod, OpBuilder &b, Location loc)
+      : mod(mod), b(b), defLoc(loc) {
+    assert(mod && "expected attached module for EVM builder");
+  }
 
   /// Generates a pointer to the address in the heap.
   Value genHeapPtr(Value addr, std::optional<Location> locArg = std::nullopt);
@@ -160,6 +162,12 @@ private:
   genResizeDynStorageArray(mlir::Value arraySlot, mlir::Value newLen,
                            mlir::Type eltTy,
                            std::optional<mlir::Location> locArg = std::nullopt);
+
+  /// Generates a revert with message.
+  void genRevertWithMsg(std::string const &msg,
+                        std::optional<Location> locArg = std::nullopt);
+  void genRevertWithMsg(Value cond, std::string const &msg,
+                        std::optional<Location> locArg = std::nullopt);
 
 public:
   //
@@ -358,16 +366,25 @@ public:
   void genPanic(PanicCode code, Value cond,
                 std::optional<Location> locArg = std::nullopt);
 
-  /// Generates a revert with message.
-  void genRevertWithMsg(std::string const &msg,
-                        std::optional<Location> locArg = std::nullopt);
-  void genRevertWithMsg(Value cond, std::string const &msg,
-                        std::optional<Location> locArg = std::nullopt);
+  /// Generates a revert with message if compiler-generated debug revert strings
+  /// should be emitted, otherwise generates a revert without message.
+  void genDebugRevertWithMsg(Value cond, std::string const &msg,
+                             std::optional<Location> locArg = std::nullopt);
+
+  /// Generates a revert with message if user-supplied revert strings should be
+  /// preserved, otherwise generates a revert without message.
+  void genUserRevertWithMsg(std::string const &msg,
+                            std::optional<Location> locArg = std::nullopt);
+  void genUserRevertWithMsg(Value cond, std::string const &msg,
+                            std::optional<Location> locArg = std::nullopt);
 
   /// Generates a forwarding revert.
   void genForwardingRevert(std::optional<Location> locArg = std::nullopt);
   void genForwardingRevert(Value cond,
                            std::optional<Location> locArg = std::nullopt);
+
+  /// Generates a revert(0, 0) unconditionally.
+  void genRevert(std::optional<Location> locArg = std::nullopt);
 
   /// Generates a revert without message.
   void genRevert(Value cond, std::optional<Location> locArg = std::nullopt);

@@ -28,7 +28,7 @@ void evm::lowerSetImmutables(ModuleOp mod,
     for (uint64_t offset : it->second) {
       Location loc = immOp.getLoc();
       OpBuilder b(immOp);
-      evm::Builder evmB(b, loc);
+      evm::Builder evmB(mod, b, loc);
 
       auto i256Ty = IntegerType::get(b.getContext(), 256);
       auto offsetConst = b.create<LLVM::ConstantOp>(

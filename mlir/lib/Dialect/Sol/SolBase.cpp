@@ -48,6 +48,10 @@ struct SolOpAsmDialectInterface : public OpAsmDialectInterface {
       os << stringifyEvmVersion(evmVersionAttr.getValue());
       return AliasResult::OverridableAlias;
     }
+    if (auto revertStringsAttr = dyn_cast<RevertStringsAttr>(attr)) {
+      os << stringifyRevertStrings(revertStringsAttr.getValue());
+      return AliasResult::OverridableAlias;
+    }
     return AliasResult::NoAlias;
   }
 };
@@ -78,8 +82,18 @@ Operation *SolDialect::materializeConstant(OpBuilder &builder, Attribute val,
   return builder.create<ConstantOp>(loc, type, cast<TypedAttr>(val));
 }
 
-bool mlir::sol::isRevertStringsEnabled(ModuleOp mod) {
-  return mod->hasAttr("sol.revert_strings");
+static RevertStrings getRevertStrings(ModuleOp mod) {
+  if (auto attr = mod->getAttrOfType<RevertStringsAttr>("sol.revert_strings"))
+    return attr.getValue();
+  return RevertStrings::Default;
+}
+
+bool mlir::sol::shouldEmitDebugRevertStrings(ModuleOp mod) {
+  return getRevertStrings(mod) >= RevertStrings::Debug;
+}
+
+bool mlir::sol::shouldKeepUserRevertStrings(ModuleOp mod) {
+  return getRevertStrings(mod) != RevertStrings::Strip;
 }
 
 bool mlir::sol::evmhasStaticCall(ModuleOp mod) {

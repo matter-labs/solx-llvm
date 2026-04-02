@@ -93,7 +93,8 @@ Value genCalldataAccessRef(evm::Builder &evmB, OpBuilder &b, Location loc,
       bExt.genI256Const(neededLength - 1));
   Value invalidOffset = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
                                                 relOffset, maxRelOffset);
-  evmB.genRevertWithMsg(invalidOffset, "Invalid calldata access offset", loc);
+  evmB.genDebugRevertWithMsg(invalidOffset, "Invalid calldata access offset",
+                             loc);
 
   Value refAddr = b.create<arith::AddIOp>(loc, baseAddr, relOffset);
   auto genLengthAndStrideGuards = [&](Value dataAddr, Value length,
@@ -103,14 +104,16 @@ Value genCalldataAccessRef(evm::Builder &evmB, OpBuilder &b, Location loc,
     Value invalidLength = b.create<arith::CmpIOp>(
         loc, arith::CmpIPredicate::ugt, length,
         bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
-    evmB.genRevertWithMsg(invalidLength, "Invalid calldata access length", loc);
+    evmB.genDebugRevertWithMsg(invalidLength, "Invalid calldata access length",
+                               loc);
 
     Value callDataSize = b.create<yul::CallDataSizeOp>(loc);
     Value maxDataAddr = b.create<arith::SubIOp>(
         loc, callDataSize, b.create<arith::MulIOp>(loc, length, stride));
     Value invalidStride = b.create<arith::CmpIOp>(
         loc, arith::CmpIPredicate::sgt, dataAddr, maxDataAddr);
-    evmB.genRevertWithMsg(invalidStride, "Invalid calldata access stride", loc);
+    evmB.genDebugRevertWithMsg(invalidStride, "Invalid calldata access stride",
+                               loc);
   };
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
@@ -518,7 +521,7 @@ struct ABIDecodeGuards {
     Value lastByte = b.create<arith::AddIOp>(loc, addr, bExt.genI256Const(31));
     Value invalid = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
                                             lastByte, tupleEnd);
-    evmB.genRevertWithMsg(invalid, kInvalidArrayOffset, loc);
+    evmB.genDebugRevertWithMsg(invalid, kInvalidArrayOffset, loc);
   }
 
   // ABI offsets and lengths are rejected when they exceed the uint64 range
@@ -527,14 +530,14 @@ struct ABIDecodeGuards {
     Value invalid = b.create<arith::CmpIOp>(
         loc, arith::CmpIPredicate::ugt, value,
         bExt.genI256Const(APInt::getLowBitsSet(256, 64)));
-    evmB.genRevertWithMsg(invalid, msg, loc);
+    evmB.genDebugRevertWithMsg(invalid, msg, loc);
   }
 
   // Validates that a computed end address stays within the tuple boundary.
   void requireEndInBounds(Value endAddr, char const *msg) {
     Value invalid = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt,
                                             endAddr, tupleEnd);
-    evmB.genRevertWithMsg(invalid, msg, loc);
+    evmB.genDebugRevertWithMsg(invalid, msg, loc);
   }
 
   // Fixed arrays are ABI-laid out inline, so their full head span must fit.
@@ -2001,11 +2004,8 @@ void evm::Builder::genABITupleSizeAssert(TypeRange tys, Value tupleSize,
   auto shortTupleCond =
       b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, tupleSize,
                               bExt.genI256Const(totCallDataHeadSz));
-  assert(shortTupleCond->getParentOfType<ModuleOp>());
-  if (sol::isRevertStringsEnabled(shortTupleCond->getParentOfType<ModuleOp>()))
-    genRevertWithMsg(shortTupleCond, "ABI decoding: tuple data too short", loc);
-  else
-    genRevert(shortTupleCond, loc);
+  genDebugRevertWithMsg(shortTupleCond, "ABI decoding: tuple data too short",
+                        loc);
 }
 
 Value evm::Builder::genABITupleEncoding(
@@ -2066,7 +2066,8 @@ Value evm::Builder::genABITupleEncoding(
         Value tooLongCond =
             b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, i256Size,
                                     bExt.genI256Const(maxLength));
-        genRevertWithMsg(tooLongCond, "ABI encoding: array data too long", loc);
+        genDebugRevertWithMsg(tooLongCond, "ABI encoding: array data too long",
+                              loc);
       }
       assert(dstAddr == tailAddr);
       if (includeLengthPrefix)
@@ -2802,6 +2803,13 @@ void evm::Builder::genForwardingRevert(Value cond,
   genForwardingRevert(loc);
 }
 
+void evm::Builder::genRevert(std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+  mlir::Value zero = bExt.genI256Const(0);
+  b.create<yul::RevertOp>(loc, zero, zero);
+}
+
 void evm::Builder::genRevert(Value cond, std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
 
@@ -2809,10 +2817,7 @@ void evm::Builder::genRevert(Value cond, std::optional<Location> locArg) {
 
   OpBuilder::InsertionGuard insertGuard(b);
   b.setInsertionPointToStart(&ifOp.getThenRegion().front());
-
-  mlir::solgen::BuilderExt bExt(b, loc);
-  mlir::Value zero = bExt.genI256Const(0);
-  b.create<yul::RevertOp>(loc, zero, zero);
+  genRevert(loc);
 }
 
 void evm::Builder::genRevert(TypeRange tys, ValueRange vals,
@@ -2871,6 +2876,30 @@ void evm::Builder::genRevertWithMsg(Value cond, std::string const &msg,
   OpBuilder::InsertionGuard insertGuard(b);
   b.setInsertionPointToStart(&ifOp.getThenRegion().front());
   genRevertWithMsg(msg, loc);
+}
+
+void evm::Builder::genDebugRevertWithMsg(Value cond, std::string const &msg,
+                                         std::optional<mlir::Location> locArg) {
+  if (sol::shouldEmitDebugRevertStrings(mod) && !msg.empty())
+    genRevertWithMsg(cond, msg, locArg);
+  else
+    genRevert(cond, locArg);
+}
+
+void evm::Builder::genUserRevertWithMsg(std::string const &msg,
+                                        std::optional<mlir::Location> locArg) {
+  if (sol::shouldKeepUserRevertStrings(mod) && !msg.empty())
+    genRevertWithMsg(msg, locArg);
+  else
+    genRevert(locArg);
+}
+
+void evm::Builder::genUserRevertWithMsg(Value cond, std::string const &msg,
+                                        std::optional<mlir::Location> locArg) {
+  if (sol::shouldKeepUserRevertStrings(mod) && !msg.empty())
+    genRevertWithMsg(cond, msg, locArg);
+  else
+    genRevert(cond, locArg);
 }
 
 void evm::Builder::genDbgRevert(ValueRange vals,

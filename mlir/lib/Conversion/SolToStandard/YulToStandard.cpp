@@ -25,12 +25,19 @@ using namespace mlir;
 
 namespace {
 
+template <typename OpT>
+static ModuleOp getModule(OpT op) {
+  ModuleOp mod = op->template getParentOfType<ModuleOp>();
+  assert(mod && "expected attached module");
+  return mod;
+}
+
 struct UpdFreePtrOpLowering : public OpRewritePattern<yul::UpdFreePtrOp> {
   using OpRewritePattern<yul::UpdFreePtrOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(yul::UpdFreePtrOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
     Value freePtr = evmB.genFreePtr();
     evmB.genFreePtrUpd(freePtr, op.getSize());
     r.replaceOp(op, freePtr);
@@ -43,7 +50,7 @@ struct Keccak256OpLowering : public OpRewritePattern<yul::Keccak256Op> {
 
   LogicalResult matchAndRewrite(yul::Keccak256Op op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_sha3,
@@ -214,7 +221,7 @@ struct LogOpLowering : public OpRewritePattern<yul::LogOp> {
 
   LogicalResult matchAndRewrite(yul::LogOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     std::vector<Value> ins{evmB.genHeapPtr(op.getAddr()), op.getSize()};
     for (Value topic : op.getTopics())
@@ -483,7 +490,7 @@ struct CallDataLoadOpLowering : public OpRewritePattern<yul::CallDataLoadOp> {
 
   LogicalResult matchAndRewrite(yul::CallDataLoadOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     Value ptr = evmB.genCallDataPtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::LoadOp>(op, op.getType(), ptr,
@@ -510,7 +517,7 @@ struct CallDataCopyOpLowering : public OpRewritePattern<yul::CallDataCopyOp> {
 
   LogicalResult matchAndRewrite(yul::CallDataCopyOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::MemcpyOp>(
         op, /*dst=*/evmB.genHeapPtr(op.getDst()),
@@ -540,7 +547,7 @@ struct ReturnDataCopyOpLowering
 
   LogicalResult matchAndRewrite(yul::ReturnDataCopyOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::MemcpyOp>(
         op, /*dst=*/evmB.genHeapPtr(op.getDst()),
@@ -555,7 +562,7 @@ struct SLoadOpLowering : public OpRewritePattern<yul::SLoadOp> {
 
   LogicalResult matchAndRewrite(yul::SLoadOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     Value ptr = evmB.genStoragePtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::LoadOp>(op, r.getIntegerType(256), ptr,
@@ -569,7 +576,7 @@ struct SStoreOpLowering : public OpRewritePattern<yul::SStoreOp> {
 
   LogicalResult matchAndRewrite(yul::SStoreOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     Value ptr = evmB.genStoragePtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::StoreOp>(op, op.getVal(), ptr,
@@ -583,7 +590,7 @@ struct TLoadOpLowering : public OpRewritePattern<yul::TLoadOp> {
 
   LogicalResult matchAndRewrite(yul::TLoadOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     Value ptr = evmB.genTStoragePtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::LoadOp>(op, r.getIntegerType(256), ptr,
@@ -597,7 +604,7 @@ struct TStoreOpLowering : public OpRewritePattern<yul::TStoreOp> {
 
   LogicalResult matchAndRewrite(yul::TStoreOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     Value ptr = evmB.genTStoragePtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::StoreOp>(op, op.getVal(), ptr,
@@ -650,7 +657,7 @@ struct CodeCopyOpLowering : public OpRewritePattern<yul::CodeCopyOp> {
 
   LogicalResult matchAndRewrite(yul::CodeCopyOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::MemcpyOp>(
         op, /*dst=*/evmB.genHeapPtr(op.getDst()),
@@ -678,7 +685,7 @@ struct ExtCodeCopyOpLowering : public OpRewritePattern<yul::ExtCodeCopyOp> {
 
   LogicalResult matchAndRewrite(yul::ExtCodeCopyOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_extcodecopy, /*resTy=*/Type{}, /*ins=*/
@@ -708,7 +715,7 @@ struct CreateOpLowering : public OpRewritePattern<yul::CreateOp> {
 
   LogicalResult matchAndRewrite(yul::CreateOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
     Value addr = evmB.genHeapPtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_create,
@@ -723,7 +730,7 @@ struct Create2OpLowering : public OpRewritePattern<yul::Create2Op> {
 
   LogicalResult matchAndRewrite(yul::Create2Op op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
     Value addr = evmB.genHeapPtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_create2,
@@ -739,7 +746,7 @@ struct MLoadOpLowering : public OpRewritePattern<yul::MLoadOp> {
 
   LogicalResult matchAndRewrite(yul::MLoadOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     Value addr = evmB.genHeapPtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::LoadOp>(op, r.getIntegerType(256), addr,
@@ -766,7 +773,7 @@ struct LoadImmutable2OpLowering
 
   LogicalResult matchAndRewrite(yul::LoadImmutableOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_loadimmutable,
         /*resTy=*/r.getIntegerType(256),
@@ -825,7 +832,7 @@ struct MStoreOpLowering : public OpRewritePattern<yul::MStoreOp> {
 
   LogicalResult matchAndRewrite(yul::MStoreOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     Value addr = evmB.genHeapPtr(op.getAddr());
     r.replaceOpWithNewOp<LLVM::StoreOp>(op, op.getVal(), addr,
@@ -839,7 +846,7 @@ struct MStore8OpLowering : public OpRewritePattern<yul::MStore8Op> {
 
   LogicalResult matchAndRewrite(yul::MStore8Op op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_mstore8,
@@ -881,7 +888,7 @@ struct MCopyOpLowering : public OpRewritePattern<yul::MCopyOp> {
                                 PatternRewriter &r) const override {
     // TODO? Check m_evmVersion.hasMcopy() and legalize here?
 
-    evm::Builder evmB(r, op->getLoc());
+    evm::Builder evmB(getModule(op), r, op->getLoc());
 
     // Generate the memmove.
     // FIXME: Add align 1 param attribute.
@@ -910,7 +917,7 @@ struct RevertOpLowering : public OpRewritePattern<yul::RevertOp> {
   LogicalResult matchAndRewrite(yul::RevertOp op,
                                 PatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
@@ -928,7 +935,7 @@ struct BuiltinCallOpLowering : public OpRewritePattern<yul::CallOp> {
 
   LogicalResult matchAndRewrite(yul::CallOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_call,
@@ -947,7 +954,7 @@ struct CallCodeOpLowering : public OpRewritePattern<yul::CallCodeOp> {
 
   LogicalResult matchAndRewrite(yul::CallCodeOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_callcode,
@@ -966,7 +973,7 @@ struct StaticCallOpLowering : public OpRewritePattern<yul::StaticCallOp> {
 
   LogicalResult matchAndRewrite(yul::StaticCallOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_staticcall,
@@ -985,7 +992,7 @@ struct DelegateCallOpLowering : public OpRewritePattern<yul::DelegateCallOp> {
 
   LogicalResult matchAndRewrite(yul::DelegateCallOp op,
                                 PatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_delegatecall,
@@ -1005,7 +1012,7 @@ struct BuiltinRetOpLowering : public OpRewritePattern<yul::ReturnOp> {
   LogicalResult matchAndRewrite(yul::ReturnOp op,
                                 PatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
@@ -1059,7 +1066,7 @@ struct ICallOpLowering : public OpConversionPattern<sol::ICallOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto calleeArgs = adaptor.getOperands().drop_front();
     auto calleeTy = mlir::FunctionType::get(

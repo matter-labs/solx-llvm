@@ -55,9 +55,11 @@ bool isNonPtrRefType(Type ty);
 /// Returns the element type of a non mapping reference type.
 Type getEltType(Type ty, Index structTyIdx = 0);
 
-/// Return true if revert strings (RevertStrings::Debug) needs to be generated
-/// in the lowering.
-bool isRevertStringsEnabled(ModuleOp mod);
+/// Returns true if compiler-generated debug revert strings should be emitted.
+bool shouldEmitDebugRevertStrings(ModuleOp mod);
+
+/// Returns true if user-supplied revert strings should be preserved.
+bool shouldKeepUserRevertStrings(ModuleOp mod);
 
 /// Return true if the type is address-like (i.e. address or contract type).
 bool isAddressLikeType(Type ty);

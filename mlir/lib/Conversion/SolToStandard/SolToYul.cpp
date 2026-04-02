@@ -35,6 +35,13 @@ using namespace mlir;
 
 namespace {
 
+template <typename OpT>
+static ModuleOp getModule(OpT op) {
+  ModuleOp mod = op->template getParentOfType<ModuleOp>();
+  assert(mod && "expected attached module");
+  return mod;
+}
+
 struct ConstantOpLowering : public OpRewritePattern<sol::ConstantOp> {
   using OpRewritePattern<sol::ConstantOp>::OpRewritePattern;
 
@@ -230,7 +237,7 @@ struct EnumCastOpLowering : public OpConversionPattern<sol::EnumCastOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto enumTy = dyn_cast<sol::EnumType>(op.getType());
     auto panicCond = r.create<arith::CmpIOp>(
@@ -307,7 +314,7 @@ struct DivOrModOpLowering : public OpConversionPattern<SolOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto ty = cast<IntegerType>(op.getType());
     Value lhs = adaptor.getLhs();
@@ -364,12 +371,13 @@ struct CExpOpLowering : public OpConversionPattern<sol::CExpOp> {
   //     }
   //  }
 
-  std::pair<Value, Value> genExpHelper(ConversionPatternRewriter &r,
+  std::pair<Value, Value> genExpHelper(ModuleOp mod,
+                                       ConversionPatternRewriter &r,
                                        Location loc, Value initPow,
                                        Value initBase, Value initExp,
                                        Value maxPow) const {
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(mod, r, loc);
 
     auto ty = cast<IntegerType>(initBase.getType());
     Value one = bExt.genConst(1, ty.getWidth(), loc);
@@ -454,7 +462,7 @@ struct CExpOpLowering : public OpConversionPattern<sol::CExpOp> {
                     ConversionPatternRewriter &r) const {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value base = adaptor.getLhs();
     Value exp = adaptor.getRhs();
@@ -561,7 +569,8 @@ struct CExpOpLowering : public OpConversionPattern<sol::CExpOp> {
     }
     // If 4 else
     r.setInsertionPointToStart(&ifViaExpBuitinCond.getElseRegion().front());
-    auto [pow2, base2] = genExpHelper(r, loc, one, base, exp, max256);
+    auto [pow2, base2] =
+        genExpHelper(getModule(op), r, loc, one, base, exp, max256);
 
     {
       r.setInsertionPointToEnd(&ifViaExpBuitinCond.getElseRegion().front());
@@ -623,7 +632,7 @@ struct CExpOpLowering : public OpConversionPattern<sol::CExpOp> {
                   ConversionPatternRewriter &r) const {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value base = adaptor.getLhs();
     Value exp = adaptor.getRhs();
@@ -703,7 +712,8 @@ struct CExpOpLowering : public OpConversionPattern<sol::CExpOp> {
         r.create<arith::SelectOp>(loc, expIsOdd, base, one).getResult();
     Value base2 = r.create<arith::MulIOp>(loc, base, base);
     Value exp2 = r.create<arith::ShRUIOp>(loc, exp, one);
-    auto [pow3, base3] = genExpHelper(r, loc, pow2, base2, exp2, max256);
+    auto [pow3, base3] =
+        genExpHelper(getModule(op), r, loc, pow2, base2, exp2, max256);
 
     r.setInsertionPointToEnd(&ifExpEqOne.getElseRegion().front());
     {
@@ -793,7 +803,7 @@ static Value getCryptoHashLowering(OpT op, uint32_t preCompieAddr,
                                    ConversionPatternRewriter &r) {
   Location loc = op.getLoc();
   mlir::solgen::BuilderExt bExt(r, loc);
-  evm::Builder evmB(r, loc);
+  evm::Builder evmB(getModule(op), r, loc);
 
   Type ty = op.getData().getType();
   sol::DataLocation dataLoc = sol::getDataLocation(ty);
@@ -829,10 +839,10 @@ static Value getCryptoHashLowering(OpT op, uint32_t preCompieAddr,
 }
 
 template <typename ModOpT>
-static Value genYulModOp(ConversionPatternRewriter &r, Location loc, Value x,
-                         Value y, Value mod) {
+static Value genYulModOp(ModuleOp module, ConversionPatternRewriter &r,
+                         Location loc, Value x, Value y, Value mod) {
   mlir::solgen::BuilderExt bExt(r, loc);
-  evm::Builder evmB(r, loc);
+  evm::Builder evmB(module, r, loc);
 
   // Yul mod ops work with unsigned i256 values.
   Value x256 = bExt.genIntCast(256, /*isSigned=*/false, x);
@@ -888,7 +898,7 @@ struct CAddOpLowering : public OpConversionPattern<sol::CAddOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto ty = cast<IntegerType>(op.getType());
     Value lhs = adaptor.getLhs();
@@ -948,7 +958,7 @@ struct CSubOpLowering : public OpConversionPattern<sol::CSubOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     // See comments in sol.cadd lowering on why we don't have a different
     // codegen for small ints.
@@ -1001,7 +1011,7 @@ struct CMulOpLowering : public OpConversionPattern<sol::CMulOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto ty = cast<IntegerType>(op.getType());
     Value lhs = adaptor.getLhs();
@@ -1066,8 +1076,9 @@ struct AddModOpLowering : public OpConversionPattern<sol::AddModOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
 
-    Value result = genYulModOp<yul::AddModOp>(r, loc, adaptor.getX(),
-                                              adaptor.getY(), adaptor.getMod());
+    Value result =
+        genYulModOp<yul::AddModOp>(getModule(op), r, loc, adaptor.getX(),
+                                   adaptor.getY(), adaptor.getMod());
     r.replaceOp(op, result);
 
     return success();
@@ -1080,8 +1091,9 @@ struct MulModOpLowering : public OpConversionPattern<sol::MulModOp> {
   LogicalResult matchAndRewrite(sol::MulModOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    Value result = genYulModOp<yul::MulModOp>(r, loc, adaptor.getX(),
-                                              adaptor.getY(), adaptor.getMod());
+    Value result =
+        genYulModOp<yul::MulModOp>(getModule(op), r, loc, adaptor.getX(),
+                                   adaptor.getY(), adaptor.getMod());
     r.replaceOp(op, result);
 
     return success();
@@ -1095,7 +1107,7 @@ struct CDivOpLowering : public OpConversionPattern<sol::CDivOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto ty = cast<IntegerType>(op.getType());
     Value lhs = adaptor.getLhs();
@@ -1137,7 +1149,7 @@ struct Keccak256OpLowering : public OpConversionPattern<sol::Keccak256Op> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type ty = op.getAddr().getType();
     sol::DataLocation dataLoc = sol::getDataLocation(ty);
@@ -1179,7 +1191,7 @@ struct EcrecoverOpLowering : public OpConversionPattern<sol::EcrecoverOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value zero = bExt.genI256Const(0);
     Value retSize = bExt.genI256Const(32);
@@ -1313,7 +1325,7 @@ struct MallocOpLowering : public OpConversionPattern<sol::MallocOp> {
 
   LogicalResult matchAndRewrite(sol::MallocOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
     r.replaceOp(op, evmB.genMemAlloc(op.getType(), op.getZeroInit(), {},
                                      adaptor.getSize()));
     return success();
@@ -1326,7 +1338,7 @@ struct ArrayLitOpLowering : public OpConversionPattern<sol::ArrayLitOp> {
   LogicalResult matchAndRewrite(sol::ArrayLitOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
     r.replaceOp(op,
                 evmB.genMemAlloc(op.getType(), false, adaptor.getIns(), {}));
     return success();
@@ -1340,7 +1352,8 @@ struct StringLitOpLowering : public OpConversionPattern<sol::StringLitOp> {
                                 ConversionPatternRewriter &r) const override {
 
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    auto mod = getModule(op);
+    evm::Builder evmB(mod, r, loc);
     mlir::solgen::BuilderExt bExt(r, op.getLoc());
 
     StringRef lit = adaptor.getValue();
@@ -1354,7 +1367,6 @@ struct StringLitOpLowering : public OpConversionPattern<sol::StringLitOp> {
       // genMemAlloc(Type) calls genMemAllocForDynArray which writes the length
       // word. Then the CODECOPY below fills only the data area.
       allocPtr = evmB.genMemAlloc(op.getType(), false, {}, litSize, loc);
-      auto mod = op->getParentOfType<ModuleOp>();
       // Create a global constant initialized with the given string literal.
       LLVM::GlobalOp globConst = bExt.getStringLiteralGlobalOp(lit, mod);
       auto ptrToArray =
@@ -1387,7 +1399,7 @@ struct ConcatOpLowering : public OpConversionPattern<sol::ConcatOp> {
   LogicalResult matchAndRewrite(sol::ConcatOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
     Value freePtr = evmB.genFreePtr();
@@ -1446,7 +1458,7 @@ struct PushOpLowering : public OpConversionPattern<sol::PushOp> {
   LogicalResult matchAndRewrite(sol::PushOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
     Type inpTy = op.getInp().getType();
@@ -1488,7 +1500,7 @@ struct PushStringOpLowering : public OpConversionPattern<sol::PushStringOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type inpValueTy = op.getValue().getType();
     Value castedVal =
@@ -1514,7 +1526,7 @@ struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
   LogicalResult matchAndRewrite(sol::PopOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
     mlir::solgen::BuilderExt bExt(r, loc);
 
     Type inpTy = op.getInp().getType();
@@ -1610,7 +1622,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type baseAddrTy = op.getBaseAddr().getType();
     Value remappedBaseAddr = adaptor.getBaseAddr();
@@ -1842,7 +1854,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value addr = adaptor.getAddr();
     sol::DataLocation dataLoc = sol::getDataLocation(op.getAddr().getType());
@@ -1961,7 +1973,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value remappedVal = adaptor.getVal();
     Value remappedAddr = adaptor.getAddr();
@@ -2099,10 +2111,11 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
   // carry no data-location annotation and sol::getDataLocation would return
   // Stack for them.  The top-level caller derives it from the array type; all
   // recursive calls propagate it directly.
-  Value genCopy(Value srcAddr, Type ty, sol::DataLocation srcDataLoc,
-                PatternRewriter &r, Location loc) const {
+  Value genCopy(ModuleOp mod, Value srcAddr, Type ty,
+                sol::DataLocation srcDataLoc, PatternRewriter &r,
+                Location loc) const {
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(mod, r, loc);
 
     sol::DataLocation dstDataLoc = sol::DataLocation::Memory;
 
@@ -2146,7 +2159,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
                 sol::hasDynamicallySizedElt(eltTy))
               srcAddrI =
                   evmB.genCalldataEltAddr(srcAddrI, srcDataAddr, eltTy, loc);
-            Value subElm = genCopy(srcAddrI, eltTy, eltSrcDataLoc, r, loc);
+            Value subElm = genCopy(mod, srcAddrI, eltTy, eltSrcDataLoc, r, loc);
             evmB.genStore(subElm, dstAddrI, dstDataLoc);
             r.create<scf::YieldOp>(loc);
           });
@@ -2186,7 +2199,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
   LogicalResult matchAndRewrite(sol::DataLocCastOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type srcTy = op.getInp().getType();
     Type dstTy = op.getType();
@@ -2195,7 +2208,8 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
 
     if (dstDataLoc == sol::DataLocation::Memory &&
         (isa<sol::StringType>(srcTy) || isa<sol::ArrayType>(srcTy))) {
-      r.replaceOp(op, genCopy(adaptor.getInp(), srcTy, srcDataLoc, r, loc));
+      r.replaceOp(op, genCopy(getModule(op), adaptor.getInp(), srcTy,
+                              srcDataLoc, r, loc));
       return success();
     }
 
@@ -2210,7 +2224,7 @@ struct LengthOpLowering : public OpConversionPattern<sol::LengthOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type ty = op.getInp().getType();
 
@@ -2237,7 +2251,7 @@ struct SliceOpLowering : public OpConversionPattern<sol::SliceOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type arrTy = op.getArr().getType();
     assert(sol::getDataLocation(arrTy) == sol::DataLocation::CallData);
@@ -2252,12 +2266,12 @@ struct SliceOpLowering : public OpConversionPattern<sol::SliceOp> {
     // Validate: start <= end
     auto startGtEnd =
         r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, start, end);
-    evmB.genRevertWithMsg(startGtEnd, "Slice starts after end", loc);
+    evmB.genDebugRevertWithMsg(startGtEnd, "Slice starts after end", loc);
 
     // Validate: end <= length
     auto endGtLen =
         r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt, end, length);
-    evmB.genRevertWithMsg(endGtLen, "Slice is greater than length", loc);
+    evmB.genDebugRevertWithMsg(endGtLen, "Slice is greater than length", loc);
 
     // Compute stride (element size in calldata)
     unsigned stride = 32;
@@ -2286,7 +2300,7 @@ struct CopyOpLowering : public OpConversionPattern<sol::CopyOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Type srcTy = op.getSrc().getType();
     Type dstTy = op.getDst().getType();
@@ -2493,7 +2507,7 @@ struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value freePtr = evmB.genFreePtr();
     if (op.getPacked()) {
@@ -2541,7 +2555,7 @@ struct DecodeOpLowering : public OpConversionPattern<sol::DecodeOp> {
   LogicalResult matchAndRewrite(sol::DecodeOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     std::vector<Value> results;
     Type srcTy = op.getAddr().getType();
@@ -2571,8 +2585,8 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
-    auto mod = op->getParentOfType<ModuleOp>();
+    auto mod = getModule(op);
+    evm::Builder evmB(mod, r, loc);
 
     assert(sol::evmCanOverchargeGasForCall(mod) && "NYI");
 
@@ -2587,21 +2601,18 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
     for (auto resTy : op.getCalleeType().getResults()) {
       totHeadSize += evm::getCallDataHeadSize(resTy);
     }
-    // TODO: Do we really need to check revertStrings() >= RevertStrings::Debug
-    // here?
-    bool extCodeSizeCheck =
-        totHeadSize == 0 || !sol::evmSupportsReturnData(mod);
+
+    bool extCodeSizeCheck = totHeadSize == 0 ||
+                            !sol::evmSupportsReturnData(mod) ||
+                            sol::shouldEmitDebugRevertStrings(mod);
 
     if (extCodeSizeCheck) {
       // Generate the revert code.
       auto extCodeSize = r.create<yul::ExtCodeSizeOp>(loc, adaptor.getAddr());
       auto isExtCodeSizeZero = r.create<arith::CmpIOp>(
           loc, arith::CmpIPredicate::eq, extCodeSize, bExt.genI256Const(0));
-      if (sol::isRevertStringsEnabled(mod))
-        evmB.genRevertWithMsg(isExtCodeSizeZero,
-                              "Target contract does not contain code");
-      else
-        evmB.genRevert(isExtCodeSizeZero);
+      evmB.genDebugRevertWithMsg(isExtCodeSizeZero,
+                                 "Target contract does not contain code");
     }
 
     // Generate the store of the selector.
@@ -2739,9 +2750,9 @@ static LogicalResult lowerBareCallLikeOp(OpT op, AdaptorT adaptor,
                                          OpBuilderFuncT &&opBuilderFunc) {
   Location loc = op.getLoc();
   mlir::solgen::BuilderExt bExt(r, loc);
-  evm::Builder evmB(r, loc);
+  auto mod = getModule(op);
+  evm::Builder evmB(mod, r, loc);
 
-  auto mod = op->template getParentOfType<ModuleOp>();
   assert(sol::evmSupportsReturnData(mod) && "NYI");
 
   auto inpTy = cast<sol::StringType>(op.getInp().getType());
@@ -2856,7 +2867,7 @@ struct TransferOpLowering : public OpConversionPattern<sol::TransferOp> {
   LogicalResult matchAndRewrite(sol::TransferOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value statusIsZero =
         genValueTransferStatus(loc, adaptor, arith::CmpIPredicate::eq, r);
@@ -2915,7 +2926,7 @@ struct NewOpLowering : public OpConversionPattern<sol::NewOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value bytecodeAddr = evmB.genFreePtr();
     Value dataOffset = r.create<yul::DataOffsetOp>(loc, op.getObjName());
@@ -2950,7 +2961,7 @@ struct ObjectCodeOpLowering : public OpConversionPattern<sol::ObjectCodeOp> {
   LogicalResult matchAndRewrite(sol::ObjectCodeOp op, OpAdaptor /*adaptor*/,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     Value dataSize = r.create<yul::DataSizeOp>(loc, op.getObjName());
     Value alloc = evmB.genMemAlloc(op.getType(), /*zeroInit=*/false,
@@ -2971,7 +2982,7 @@ struct CodeOpLowering : public OpConversionPattern<sol::CodeOp> {
 
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     auto extCodeSize = r.create<yul::ExtCodeSizeOp>(loc, adaptor.getContAddr());
     Value alloc = evmB.genMemAlloc(op.getType(), /*zeroInit=*/false,
@@ -3012,7 +3023,7 @@ struct TryOpLowering : public OpConversionPattern<sol::TryOp> {
     //
 
     if (tryOp.getFallbackRegion().empty()) {
-      evm::Builder evmB(r, loc);
+      evm::Builder evmB(getModule(tryOp), r, loc);
       r.setInsertionPointToStart(&ifStatus.getElseRegion().emplaceBlock());
       evmB.genForwardingRevert();
       r.setInsertionPoint(r.create<sol::YieldOp>(loc));
@@ -3149,7 +3160,7 @@ struct TryOpLowering : public OpConversionPattern<sol::TryOp> {
       // YulUtilFunctions::tryDecodeErrorMessageFunction()?
       BlockArgument blkArg = thenEntry.getArgument(0);
       Location loc = blkArg.getLoc();
-      evm::Builder evmB(r, loc);
+      evm::Builder evmB(getModule(tryOp), r, loc);
       Value abiTupleSize =
           r.create<arith::SubIOp>(loc, returnDataSize, bExt.genI256Const(4));
       Value abiTuple = evmB.genMemAlloc(abiTupleSize);
@@ -3188,7 +3199,7 @@ struct AssertOpLowering : public OpConversionPattern<sol::AssertOp> {
   LogicalResult matchAndRewrite(sol::AssertOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     // Generate: if (!cond) { panic(0x01) }
     mlir::Value falseVal =
@@ -3209,7 +3220,7 @@ struct RequireOpLowering : public OpConversionPattern<sol::RequireOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     // Generate the revert condition.
     mlir::Value falseVal =
@@ -3226,7 +3237,7 @@ struct RequireOpLowering : public OpConversionPattern<sol::RequireOp> {
 
     // Generate the revert.
     if (!op.getMsg().empty())
-      evmB.genRevertWithMsg(negCond, op.getMsg().str());
+      evmB.genUserRevertWithMsg(negCond, op.getMsg().str());
     else
       evmB.genRevert(negCond);
 
@@ -3242,7 +3253,7 @@ struct EmitOpLowering : public OpConversionPattern<sol::EmitOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     // Collect the remapped indexed and non-indexed args.
     //
@@ -3282,7 +3293,7 @@ struct RevertOpLowering : public OpConversionPattern<sol::RevertOp> {
 
   LogicalResult matchAndRewrite(sol::RevertOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
-    evm::Builder evmB(r, op.getLoc());
+    evm::Builder evmB(getModule(op), r, op.getLoc());
     if (op.getCall()) {
       // revert ErrorName(...)
       assert(!op.getSignature().empty());
@@ -3290,12 +3301,10 @@ struct RevertOpLowering : public OpConversionPattern<sol::RevertOp> {
                      op.getSignature());
     } else if (!op.getSignature().empty()) {
       // revert("reason")
-      evmB.genRevertWithMsg(op.getSignature().str());
+      evmB.genUserRevertWithMsg(op.getSignature().str());
     } else {
       // revert()
-      mlir::solgen::BuilderExt bExt(r, op.getLoc());
-      mlir::Value zero = bExt.genI256Const(0);
-      r.create<yul::RevertOp>(op.getLoc(), zero, zero);
+      evmB.genRevert(op.getLoc());
     }
     r.eraseOp(op);
     return success();
@@ -3590,9 +3599,9 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
   using OpRewritePattern<sol::ContractOp>::OpRewritePattern;
 
   /// Generate the call value check.
-  void genCallValChk(PatternRewriter &r, Location loc) const {
+  void genCallValChk(ModuleOp mod, PatternRewriter &r, Location loc) const {
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(mod, r, loc);
 
     auto callVal = r.create<yul::CallValOp>(loc);
     auto callValChk = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
@@ -3616,7 +3625,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
                    PatternRewriter &r) const {
     Location loc = contrOp.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(contrOp), r, loc);
 
     Value notDelegateCallCond;
     if (contrOp.getKind() == sol::ContractKind::Library) {
@@ -3683,7 +3692,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
 
       if (contrOp.getKind() != sol::ContractKind::Library &&
           stateMutability != sol::StateMutability::Payable) {
-        genCallValChk(r, loc);
+        genCallValChk(getModule(contrOp), r, loc);
       }
 
       // Decode the input parameters (if required).
@@ -3743,7 +3752,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
                                 PatternRewriter &r) const override {
     mlir::Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     // Generate the creation and runtime ObjectOp.
     auto creationObj = r.create<yul::ObjectOp>(loc, op.getName());
@@ -3833,11 +3842,11 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
     genFreePtrInit(r, loc, reservedMemSize);
 
     if (!ctor) {
-      genCallValChk(r, loc);
+      genCallValChk(getModule(op), r, loc);
     } else {
       assert(ctor.getStateMutability());
       if (*ctor.getStateMutability() != sol::StateMutability::Payable)
-        genCallValChk(r, loc);
+        genCallValChk(getModule(op), r, loc);
     }
 
     // Generate the call to constructor (if required).
@@ -3920,14 +3929,14 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       (void)fallbackFnTy;
 
       if (fallbackFn.getStateMutability() != sol::StateMutability::Payable) {
-        genCallValChk(r, loc);
+        genCallValChk(getModule(op), r, loc);
       }
       r.create<sol::CallOp>(loc, fallbackFn, /*operands=*/ValueRange{});
       r.create<yul::StopOp>(loc);
 
     } else {
       // TODO: Generate error message.
-      r.create<yul::RevertOp>(loc, bExt.genI256Const(0), bExt.genI256Const(0));
+      evmB.genRevert(loc);
     }
 
     // Relocate global constants into their corresponding Creation/Runtime
@@ -3936,8 +3945,8 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
     // ObjectOp lets the EVM backend associate the CODECOPY data with the right
     // object's data section. ObjectOpLowering (a later pass) then lifts the
     // global back to module scope for final code generation.
-    ModuleOp mod = runtimeObj->getParentOfType<ModuleOp>();
-    mod->walk([&mod, &r](LLVM::AddressOfOp addrOf) {
+    ModuleOp runtimeMod = getModule(runtimeObj);
+    runtimeMod->walk([&runtimeMod, &r](LLVM::AddressOfOp addrOf) {
       StringRef name = addrOf.getGlobalName();
       if (!name.starts_with("__data_in_code_"))
         return;
@@ -3945,7 +3954,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       auto obj = addrOf->getParentOfType<yul::ObjectOp>();
       assert(obj);
       auto gOp = SymbolTable::lookupNearestSymbolFrom<LLVM::GlobalOp>(
-          mod, r.getStringAttr(name));
+          runtimeMod, r.getStringAttr(name));
       assert(gOp);
       gOp->moveBefore(obj.getEntryBlock(), obj.getEntryBlock()->begin());
     });
