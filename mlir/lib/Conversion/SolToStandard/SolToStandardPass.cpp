@@ -99,6 +99,7 @@ struct ConvertSolToStandardPass
         sol::FuncConstantOp,
         sol::DefaultFuncConstantOp,
         sol::ExtFuncConstantOp,
+        sol::ExtFuncSelectorOp,
         sol::CastOp,
         sol::AddressCastOp,
         sol::ContractCastOp,

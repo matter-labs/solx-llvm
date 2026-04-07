@@ -105,6 +105,25 @@ struct ExtFuncConstantOpLowering
   }
 };
 
+struct ExtFuncSelectorOpLowering
+    : public OpConversionPattern<sol::ExtFuncSelectorOp> {
+  using OpConversionPattern<sol::ExtFuncSelectorOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ExtFuncSelectorOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    // ExtFuncRef is packed as:
+    //   | addr (160) | selector (32) | zeros (64) |
+    // and bytes4 is represented as the selector in the top 32 bits.
+    // Shift left to move the selector into the MSB-aligned bytes4 position.
+    r.replaceOpWithNewOp<arith::ShLIOp>(op, adaptor.getFunc(),
+                                        bExt.genI256Const(160));
+    return success();
+  }
+};
+
 struct CastOpLowering : public OpConversionPattern<sol::CastOp> {
   using OpConversionPattern<sol::CastOp>::OpConversionPattern;
 
@@ -3979,6 +3998,7 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            DefaultFuncConstantOpLowering>(pats.getContext());
   pats.add<CastOpLowering, AddressCastOpLowering, ContractCastOpLowering,
            EnumCastOpLowering, BytesCastOpLowering, ExtFuncConstantOpLowering,
+           ExtFuncSelectorOpLowering,
            ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
            ArithBinOpLowering<sol::SubOp, arith::SubIOp>,
            ArithBinOpLowering<sol::MulOp, arith::MulIOp>,
