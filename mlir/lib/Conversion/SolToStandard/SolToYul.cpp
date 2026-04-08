@@ -311,6 +311,22 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
   }
 };
 
+struct DynBytesToFixedBytesOpLowering
+    : public OpConversionPattern<sol::DynBytesToFixedBytesOp> {
+  using OpConversionPattern<sol::DynBytesToFixedBytesOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::DynBytesToFixedBytesOp op,
+                                OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    evm::Builder evmB(getModule(op), r, op.getLoc());
+    auto dstTy = cast<sol::BytesType>(op.getType());
+    r.replaceOp(op, evmB.genDynBytesToFixedBytes(adaptor.getInp(),
+                                                 op.getInp().getType(), dstTy,
+                                                 op.getLoc()));
+    return success();
+  }
+};
+
 /// A templatized version of a conversion pattern for lowering add, sub, mul
 /// and exp ops.
 template <typename SrcOpT, typename DstOpT>
@@ -3997,7 +4013,8 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<ConstantOpLowering, FuncConstantOpLowering,
            DefaultFuncConstantOpLowering>(pats.getContext());
   pats.add<CastOpLowering, AddressCastOpLowering, ContractCastOpLowering,
-           EnumCastOpLowering, BytesCastOpLowering, ExtFuncConstantOpLowering,
+           EnumCastOpLowering, BytesCastOpLowering,
+           DynBytesToFixedBytesOpLowering, ExtFuncConstantOpLowering,
            ExtFuncSelectorOpLowering,
            ArithBinOpLowering<sol::AddOp, arith::AddIOp>,
            ArithBinOpLowering<sol::SubOp, arith::SubIOp>,

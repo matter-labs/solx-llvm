@@ -105,6 +105,13 @@ def Sol_BytesCastOp : Sol_Op<"bytes_cast",
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
 }
 
+def Sol_DynBytesToFixedBytesOp : Sol_Op<"dyn_bytes_to_fixedbytes"> {
+  let arguments = (ins Sol_StringType:$inp);
+  let results = (outs Sol_BytesType:$out);
+
+  let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
+}
+
 // TODO: Add folders for the c0 case.
 
 // Checked arith ops are not speculatable, but unchecked are (including div and

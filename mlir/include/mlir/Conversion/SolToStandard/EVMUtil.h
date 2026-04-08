@@ -182,6 +182,10 @@ public:
   Value genDataAddrPtr(Value addr, sol::DataLocation dataLoc,
                        std::optional<Location> locArg = std::nullopt);
 
+  /// Extracts the leading fixed-bytes value from a dynamic bytes type.
+  Value genDynBytesToFixedBytes(Value src, Type srcTy, sol::BytesType dstTy,
+                                std::optional<Location> locArg = std::nullopt);
+
   /// Generates the address computation of the array or string at index.
   // TODO: Data-location should be fetched from the type! Implement APIs to
   // "clone" reference types with different data-locations.

@@ -1001,6 +1001,93 @@ Value evm::Builder::genDataAddrPtr(Value addr, sol::DataLocation dataLoc,
   llvm_unreachable("NYI");
 }
 
+Value evm::Builder::genDynBytesToFixedBytes(Value src, Type srcTy,
+                                            sol::BytesType dstTy,
+                                            std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+
+  auto srcStringTy = cast<sol::StringType>(srcTy);
+  sol::DataLocation srcDataLoc = srcStringTy.getDataLocation();
+  unsigned dstBytes = dstTy.getSize();
+
+  llvm::APInt fixedMask = llvm::APInt::getAllOnes(256);
+  if (dstBytes < 32)
+    fixedMask = fixedMask.shl(256 - dstBytes * 8);
+  Value fixedMaskVal = bExt.genI256Const(fixedMask, loc);
+
+  Value length = nullptr;
+  Value loadedWord = nullptr;
+  if (srcDataLoc == sol::DataLocation::Storage) {
+    Value lengthSlot = genLoad(src, srcDataLoc, loc);
+    length = genStorageStringLength(lengthSlot, loc);
+
+    // If length > 31, the payload lives in the out-of-place data area and the
+    // first word must be loaded from there. Otherwise the payload is packed
+    // into the slot word, so the slot contents already hold the first word.
+    Value isOutOfPlace = b.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ugt, length, bExt.genI256Const(31, loc));
+    auto ifOutOfPlace =
+        b.create<scf::IfOp>(loc, fixedMaskVal.getType(), isOutOfPlace, true);
+
+    b.setInsertionPointToStart(&ifOutOfPlace.getThenRegion().front());
+    b.create<scf::YieldOp>(
+        loc, genLoad(genDataAddrPtr(src, srcTy, loc), srcDataLoc, loc));
+
+    b.setInsertionPointToStart(&ifOutOfPlace.getElseRegion().front());
+    b.create<scf::YieldOp>(loc, lengthSlot);
+
+    b.setInsertionPointAfter(ifOutOfPlace);
+    loadedWord = ifOutOfPlace.getResult(0);
+  } else {
+    // Memory and calldata keep the payload contiguous after the header, so the
+    // first word is a direct load from the data pointer.
+    loadedWord = genLoad(genDataAddrPtr(src, srcTy, loc), srcDataLoc, loc);
+    length = genDynSize(src, srcTy, loc);
+  }
+
+  // Fixed-bytes values occupy the high-order bytes of the 256-bit word. First
+  // keep the destination-width prefix, then clear any bytes that lie past the
+  // source's logical length.
+  Value value = b.create<arith::AndIOp>(loc, loadedWord, fixedMaskVal);
+
+  // If length < dstBytes, the extracted prefix still contains bytes beyond the
+  // logical end of the source, so clear that suffix. Otherwise the prefix is
+  // already the final result.
+  Value needsShortMask = b.create<arith::CmpIOp>(
+      loc, arith::CmpIPredicate::ult, length, bExt.genI256Const(dstBytes, loc));
+  auto ifNeedsShortMask =
+      b.create<scf::IfOp>(loc, value.getType(), needsShortMask, true);
+
+  b.setInsertionPointToStart(&ifNeedsShortMask.getThenRegion().front());
+
+  // shiftBits = (dstBytes - length) * 8
+  Value shiftBits = b.create<arith::MulIOp>(
+      loc,
+      b.create<arith::SubIOp>(loc, bExt.genI256Const(dstBytes, loc), length),
+      bExt.genI256Const(8, loc));
+
+  Value shortMask = nullptr;
+  if (dstBytes == 32)
+    // shiftBits can be 256 when length is 0, so use yul::shl
+    // instead of arith::ShlIOp, as the latter can produce poison
+    // value in that case.
+    shortMask = b.create<yul::ShlOp>(loc, shiftBits, fixedMaskVal);
+  else
+    // For smaller widths, it is safe to use arith::ShlIOp, as shiftBits
+    // won't be 256.
+    shortMask = b.create<arith::ShLIOp>(loc, fixedMaskVal, shiftBits);
+
+  Value shortValue = b.create<arith::AndIOp>(loc, value, shortMask);
+  b.create<scf::YieldOp>(loc, shortValue);
+
+  b.setInsertionPointToStart(&ifNeedsShortMask.getElseRegion().front());
+  b.create<scf::YieldOp>(loc, value);
+
+  b.setInsertionPointAfter(ifNeedsShortMask);
+  return ifNeedsShortMask.getResult(0);
+}
+
 Value evm::Builder::genAddrAtIdx(Value baseAddr, Value idx, Type ty,
                                  sol::DataLocation dataLoc,
                                  std::optional<Location> locArg) {

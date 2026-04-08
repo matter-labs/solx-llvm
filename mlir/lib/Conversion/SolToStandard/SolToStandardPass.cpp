@@ -105,6 +105,7 @@ struct ConvertSolToStandardPass
         sol::ContractCastOp,
         sol::EnumCastOp,
         sol::BytesCastOp,
+        sol::DynBytesToFixedBytesOp,
         sol::AddOp,
         sol::SubOp,
         sol::MulOp,
