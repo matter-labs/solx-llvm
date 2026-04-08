@@ -2769,8 +2769,6 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
     }
     r.create<scf::YieldOp>(loc, decodedResults);
 
-    // Replace the sol.ext_call op with the status check + the decoded results.
-    assert(decodedResults.size() <= 1 && "NYI");
     SmallVector<Value, 2> newResults{statusIsNotZero};
     newResults.append(statusIfOp.getResults().begin(),
                       statusIfOp.getResults().end());
