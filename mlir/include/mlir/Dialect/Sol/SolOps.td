@@ -720,7 +720,7 @@ class Sol_ICallOpBase<string mnemonic, dag extraArgs = (ins),
                        extraArgs,
                        (ins OptionalAttr<DictArrayAttr>:$arg_attrs,
                             OptionalAttr<DictArrayAttr>:$res_attrs));
-  let results = (outs Variadic<AnyType>);
+  let results = (outs Variadic<AnyType>:$results);
 
   let extraClassDeclaration = [{
     /// Get the argument operands to the called function.
@@ -760,7 +760,7 @@ def CallOp : Sol_Op<"call", [CallOpInterface]> {
                        Variadic<AnyType>:$operands,
                        OptionalAttr<DictArrayAttr>:$arg_attrs,
                        OptionalAttr<DictArrayAttr>:$res_attrs);
-  let results = (outs Variadic<AnyType>);
+  let results = (outs Variadic<AnyType>:$results);
 
   let builders = [
     OpBuilder<(ins "FuncOp":$callee, CArg<"ValueRange", "{}">:$operands), [{
@@ -934,7 +934,7 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
                        TypeAttrOf<FunctionType>:$callee_type,
                        OptionalAttr<DictArrayAttr>:$arg_attrs,
                        OptionalAttr<DictArrayAttr>:$res_attrs);
-  let results = (outs I1:$status, Variadic<AnyType>);
+  let results = (outs I1:$status, Variadic<AnyType>:$results);
 
   // TODO: Custom builder that doesn't ask for arg/res attrs.
 
