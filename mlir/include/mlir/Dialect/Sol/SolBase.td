@@ -73,6 +73,8 @@ def Sol_FixedBytesType : Sol_Type<"FixedBytes", "fixedbytes"> {
   let assemblyFormat = [{ `<` $size `>` }];
 }
 
+def Sol_ByteType : Sol_Type<"Byte", "byte">;
+
 def Sol_DataLocation : I32Enum<"DataLocation",
                                "Data-location in reference-types",
                                [I32EnumCase<"Storage", 0>,

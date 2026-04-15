@@ -64,6 +64,12 @@ bool shouldKeepUserRevertStrings(ModuleOp mod);
 /// Return true if the type is address-like (i.e. address or contract type).
 bool isAddressLikeType(Type ty);
 
+/// Return true if the type is bytes-like (i.e. fixedbytes or byte).
+bool isBytesLikeType(Type ty);
+
+/// Return the byte size of a bytes-like type.
+unsigned getBytesSize(Type ty);
+
 /// MLIR version of solidity ast's Type::storageSize().
 unsigned getStorageSlotCount(Type ty);
 

@@ -37,6 +37,11 @@ evm::SolTypeConverter::SolTypeConverter() {
                             IntegerType::Signless);
   });
 
+  addConversion([&](sol::ByteType ty) -> Type {
+    return IntegerType::get(ty.getContext(), /*width=*/256,
+                            IntegerType::Signless);
+  });
+
   // Enum type
   addConversion([&](sol::EnumType ty) -> Type {
     // Unlike integer types, legalizing to i256 avoids unnecessary zext/trunc

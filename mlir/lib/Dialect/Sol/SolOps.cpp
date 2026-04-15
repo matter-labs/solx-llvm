@@ -137,19 +137,23 @@ bool BytesCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
   if (isa<IntegerType>(inpTy) && isa<IntegerType>(outTy))
     return false;
 
-  // bytes -> bytes.
-  if (isa<FixedBytesType>(inpTy) && isa<FixedBytesType>(outTy))
+  // byte -> byte is not a bytes cast.
+  if (isa<ByteType>(inpTy) && isa<ByteType>(outTy))
+    return false;
+
+  // byte <-> bytes and bytes <-> bytes are valid casts.
+  if (sol::isBytesLikeType(inpTy) && sol::isBytesLikeType(outTy))
     return true;
 
   // int -> bytes.
   if (auto inpIntTy = dyn_cast<IntegerType>(inpTy)) {
-    auto outBytesTy = cast<FixedBytesType>(outTy);
-    return inpIntTy.getWidth() == outBytesTy.getSize() * 8;
+    return sol::isBytesLikeType(outTy) &&
+           inpIntTy.getWidth() == sol::getBytesSize(outTy) * 8;
   }
 
   // bytes -> int.
-  return cast<FixedBytesType>(inpTy).getSize() * 8 ==
-         cast<IntegerType>(outTy).getWidth();
+  return sol::isBytesLikeType(inpTy) &&
+         sol::getBytesSize(inpTy) * 8 == cast<IntegerType>(outTy).getWidth();
 }
 
 //===----------------------------------------------------------------------===//

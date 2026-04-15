@@ -119,7 +119,7 @@ Type mlir::sol::getEltType(Type ty, Index structTyIdx) {
     return arrTy.getEltType();
   }
   if (isa<sol::StringType>(ty)) {
-    return sol::FixedBytesType::get(ty.getContext(), /*size=*/1);
+    return sol::ByteType::get(ty.getContext());
   }
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
     return structTy.getMemberTypes()[structTyIdx];
@@ -204,6 +204,18 @@ bool mlir::sol::isAddressLikeType(Type ty) {
   return isa<AddressType, ContractType>(ty);
 }
 
+bool mlir::sol::isBytesLikeType(Type ty) {
+  return isa<FixedBytesType, ByteType>(ty);
+}
+
+unsigned mlir::sol::getBytesSize(Type ty) {
+  if (isa<ByteType>(ty))
+    return 1;
+
+  auto fixedBytesTy = cast<FixedBytesType>(ty);
+  return fixedBytesTy.getSize();
+}
+
 unsigned mlir::sol::getStorageSlotCount(Type ty) {
   if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FixedBytesType>(ty) ||
       isa<MappingType>(ty) || isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) ||
@@ -235,8 +247,8 @@ unsigned mlir::sol::getStorageSlotCount(Type ty) {
 
 bool mlir::sol::canBePacked(Type ty) {
   // Scalars can be packed within a slot.
-  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FixedBytesType>(ty) ||
-      isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) || isAddressLikeType(ty))
+  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FuncRefType>(ty) ||
+      isa<ExtFuncRefType>(ty) || isAddressLikeType(ty) || isBytesLikeType(ty))
     return true;
 
   // Aggregates are slot-aligned and cannot be packed.
@@ -254,8 +266,8 @@ unsigned mlir::sol::getStorageByteSize(Type ty) {
     // Bool occupies 1 byte in storage.
     return intTy.getWidth() == 1 ? 1 : intTy.getWidth() / 8;
 
-  if (auto bytesTy = dyn_cast<FixedBytesType>(ty))
-    return bytesTy.getSize();
+  if (isBytesLikeType(ty))
+    return getBytesSize(ty);
 
   // Enums can have at most 256 members, so always 1 byte.
   if (isa<EnumType>(ty))

@@ -278,12 +278,23 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
     Type inpTy = op.getInp().getType();
     Type outTy = op.getType();
 
+    const bool isByteToBytes1 = isa<sol::ByteType>(inpTy) &&
+                                isa<sol::FixedBytesType>(outTy) &&
+                                sol::getBytesSize(outTy) == 1;
+    const bool isBytes1ToByte = isa<sol::FixedBytesType>(inpTy) &&
+                                sol::getBytesSize(inpTy) == 1 &&
+                                isa<sol::ByteType>(outTy);
+    if (isByteToBytes1 || isBytes1ToByte) {
+      // byte <-> bytes1 is a no-op.
+      r.replaceOp(op, adaptor.getInp());
+      return success();
+    }
+
     // Bytes to bytes
-    if (auto inpBytesTy = dyn_cast<sol::FixedBytesType>(inpTy)) {
-      if (auto outBytesTy = dyn_cast<sol::FixedBytesType>(outTy)) {
-        unsigned keepBytes = inpBytesTy.getSize() < outBytesTy.getSize()
-                                 ? inpBytesTy.getSize()
-                                 : outBytesTy.getSize();
+    if (sol::isBytesLikeType(inpTy)) {
+      unsigned inpBytesSize = sol::getBytesSize(inpTy);
+      if (sol::isBytesLikeType(outTy)) {
+        unsigned keepBytes = std::min(inpBytesSize, sol::getBytesSize(outTy));
         auto shiftAmt = bExt.genI256Const(256 - (8 * keepBytes));
         auto shr = r.create<arith::ShRUIOp>(loc, adaptor.getInp(), shiftAmt);
         r.replaceOpWithNewOp<arith::ShLIOp>(op, shr, shiftAmt);
@@ -292,7 +303,7 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
 
       // Bytes to int
       auto outIntTy = cast<IntegerType>(outTy);
-      auto shiftAmt = bExt.genI256Const(256 - (8 * inpBytesTy.getSize()));
+      auto shiftAmt = bExt.genI256Const(256 - (8 * inpBytesSize));
       auto shr = r.create<arith::ShRUIOp>(loc, adaptor.getInp(), shiftAmt);
       auto repl = bExt.genIntCast(outIntTy.getWidth(), /*isSigned=*/false, shr);
       r.replaceOp(op, repl);
@@ -301,10 +312,10 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
 
     // Int to bytes
     assert(isa<IntegerType>(inpTy));
-    auto outBytesTy = cast<sol::FixedBytesType>(outTy);
+    unsigned outBytesSize = sol::getBytesSize(outTy);
     Value inpAsI256 =
         bExt.genIntCast(/*width=*/256, /*isSigned=*/false, adaptor.getInp());
-    auto shiftAmt = bExt.genI256Const(256 - (8 * outBytesTy.getSize()));
+    auto shiftAmt = bExt.genI256Const(256 - (8 * outBytesSize));
     r.replaceOpWithNewOp<arith::ShLIOp>(op, inpAsI256, shiftAmt);
 
     return success();
@@ -1908,11 +1919,12 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
     case sol::DataLocation::CallData:
     case sol::DataLocation::Memory: {
       auto addrTy = cast<sol::PointerType>(op.getAddr().getType());
-      auto bytesEleTy = dyn_cast<sol::FixedBytesType>(addrTy.getPointeeType());
+      Type pointeeTy = addrTy.getPointeeType();
+
       // If loading from `bytes`, generate the low bits mask-off of the loaded
       // value.
-      if (bytesEleTy) {
-        unsigned numBits = bytesEleTy.getSize() * 8;
+      if (sol::isBytesLikeType(pointeeTy)) {
+        unsigned numBits = sol::getBytesSize(pointeeTy) * 8;
         APInt mask(/*numBits=*/256, 0);
         assert(numBits <= 256);
         mask.setHighBits(numBits);
@@ -2025,9 +2037,9 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
       sol::DataLocation dataLoc = sol::getDataLocation(addrTy);
 
       // Generate mstore8 for storing to `bytes`.
-      auto bytesEleTy = dyn_cast<sol::FixedBytesType>(sol::getEltType(addrTy));
-      if (bytesEleTy && dataLoc == sol::DataLocation::Memory) {
-        assert(bytesEleTy.getSize() == 1 && "NYI");
+      Type eltTy = sol::getEltType(addrTy);
+      if (sol::isBytesLikeType(eltTy) && dataLoc == sol::DataLocation::Memory) {
+        assert(sol::getBytesSize(eltTy) == 1 && "NYI");
         auto byteVal =
             r.create<yul::ByteOp>(loc, bExt.genI256Const(0), remappedVal);
         r.replaceOpWithNewOp<yul::MStore8Op>(op, remappedAddr, byteVal);
@@ -2078,9 +2090,9 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         // This tracks the value we prepare to be stored.
         Value preparedVal;
         unsigned numBits;
-        if (auto bytesTy = dyn_cast<sol::FixedBytesType>(eltTy)) {
-          // BytesType: shr to convert from MSB-aligned to LSB-aligned.
-          numBits = bytesTy.getSize() * 8;
+        if (sol::isBytesLikeType(eltTy)) {
+          // Bytes-like types: shr to convert from MSB-aligned to LSB-aligned.
+          numBits = sol::getBytesSize(eltTy) * 8;
           preparedVal = r.create<arith::ShRUIOp>(
               loc, remappedVal, bExt.genI256Const(256 - numBits));
         } else if (sol::isAddressLikeType(op.getVal().getType())) {

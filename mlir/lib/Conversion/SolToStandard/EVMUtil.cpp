@@ -1207,8 +1207,8 @@ Value evm::Builder::genCleanupPackedStorageValue(
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(eltTy)) {
-    unsigned numBits = bytesTy.getSize() * 8;
+  if (sol::isBytesLikeType(eltTy)) {
+    unsigned numBits = sol::getBytesSize(eltTy) * 8;
     if (numBits == 256)
       return value;
     return b.create<arith::ShLIOp>(loc, value,

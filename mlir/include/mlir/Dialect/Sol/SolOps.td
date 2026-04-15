@@ -99,8 +99,10 @@ def Sol_EnumCastOp : Sol_Op<"enum_cast",
 def Sol_BytesCastOp : Sol_Op<"bytes_cast",
   [Pure, DeclareOpInterfaceMethods<CastOpInterface>]
 >{
-  let arguments = (ins AnyTypeOf<[Sol_FixedBytesType, Sol_Int]>:$inp);
-  let results = (outs AnyTypeOf<[Sol_FixedBytesType, Sol_Int]>:$out);
+  let arguments = (ins AnyTypeOf<[Sol_ByteType, Sol_FixedBytesType,
+                                  Sol_Int]>:$inp);
+  let results = (outs AnyTypeOf<[Sol_ByteType, Sol_FixedBytesType,
+                                 Sol_Int]>:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
 }
