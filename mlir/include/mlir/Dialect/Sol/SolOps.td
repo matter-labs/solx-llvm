@@ -67,9 +67,9 @@ def Sol_AddressCastOp : Sol_Op<"address_cast",
 >{
   let arguments =
       (ins AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_ContractType,
-                      Sol_BytesType]>:$inp);
+                      Sol_FixedBytesType]>:$inp);
   let results = (outs AnyTypeOf<[AnyInteger, Sol_AddressType, Sol_ContractType,
-                                 Sol_BytesType]>:$out);
+                                 Sol_FixedBytesType]>:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
   let hasFolder = 1;
@@ -99,15 +99,15 @@ def Sol_EnumCastOp : Sol_Op<"enum_cast",
 def Sol_BytesCastOp : Sol_Op<"bytes_cast",
   [Pure, DeclareOpInterfaceMethods<CastOpInterface>]
 >{
-  let arguments = (ins AnyTypeOf<[Sol_BytesType, Sol_Int]>:$inp);
-  let results = (outs AnyTypeOf<[Sol_BytesType, Sol_Int]>:$out);
+  let arguments = (ins AnyTypeOf<[Sol_FixedBytesType, Sol_Int]>:$inp);
+  let results = (outs AnyTypeOf<[Sol_FixedBytesType, Sol_Int]>:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
 }
 
 def Sol_DynBytesToFixedBytesOp : Sol_Op<"dyn_bytes_to_fixedbytes"> {
   let arguments = (ins Sol_StringType:$inp);
-  let results = (outs Sol_BytesType:$out);
+  let results = (outs Sol_FixedBytesType:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
 }
@@ -162,24 +162,24 @@ def Sol_MulModOp : Sol_ModOp<"mulmod">;
 
 def Sol_Keccak256Op : Sol_Op<"keccak256"> {
   let arguments = (ins Sol_StringType:$addr);
-  let results = (outs Sol_BytesType:$result);
+  let results = (outs Sol_FixedBytesType:$result);
 }
 
 def Sol_Sha256Op : Sol_HashPreCompileOp<"sha256">;
 def Sol_Ripemd160Op : Sol_HashPreCompileOp<"ripemd160">;
 
 def Sol_EcrecoverOp : Sol_Op<"ecrecover"> {
-  let arguments = (ins Sol_BytesType:$hash, AnyUnsignedInteger:$v,
-      Sol_BytesType:$r, Sol_BytesType:$s);
+  let arguments = (ins Sol_FixedBytesType:$hash, AnyUnsignedInteger:$v,
+      Sol_FixedBytesType:$r, Sol_FixedBytesType:$s);
   let results = (outs Sol_AddressType:$result);
 }
 
 def Sol_CmpOp : Sol_Op<"cmp", [Pure, SameTypeOperands]> {
   let arguments = (ins Sol_CmpPredicateAttr:$predicate,
                        AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType,
-                                  Sol_BytesType]>:$lhs,
+                                  Sol_FixedBytesType]>:$lhs,
                        AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType,
-                                  Sol_BytesType]>:$rhs);
+                                  Sol_FixedBytesType]>:$rhs);
   let results = (outs I1:$result);
 
   let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs)";
@@ -265,7 +265,7 @@ def Sol_PushOp : Sol_Op<"push"> {
 //
 def Sol_PushStringOp : Sol_Op<"push_string"> {
   let arguments = (ins Sol_StringType:$addr,
-      AnyTypeOf<[Sol_BytesType, Sol_Int]>:$value);
+      AnyTypeOf<[Sol_FixedBytesType, Sol_Int]>:$value);
   let assemblyFormat =
       "$addr `,` $value attr-dict `:` type($addr) `,` type($value)";
 }
@@ -411,17 +411,17 @@ def Sol_SliceOp : Sol_Op<"slice"> {
   }];
 }
 
-def Sol_Bytes4SelectorType : Type<
-  CPred<"::llvm::isa<::mlir::sol::BytesType>($_self) && "
-        "::llvm::cast<::mlir::sol::BytesType>($_self).getSize() == 4">,
-  "!sol.bytes<4>">;
+def Sol_FixedBytes4SelectorType : Type<
+  CPred<"::llvm::isa<::mlir::sol::FixedBytesType>($_self) && "
+        "::llvm::cast<::mlir::sol::FixedBytesType>($_self).getSize() == 4">,
+  "!sol.fixedbytes<4>">;
 
 def Sol_EncodeOp : Sol_Op<"encode", [AttrSizedOperandSegments]> {
   // When $packed is set, values are encoded without per-element padding.
   // When $selector is set, it is prepended as the first 4 bytes while $ins are
   // ABI-encoded as a tuple.
   let arguments = (ins Variadic<AnyType>:$ins,
-                       Optional<Sol_Bytes4SelectorType>:$selector,
+                       Optional<Sol_FixedBytes4SelectorType>:$selector,
                        UnitAttr:$packed);
   // FIXME: AnyType -> Sol_StringType causes the asm printer to miss the prefix!
   let results = (outs AnyType:$res);
@@ -708,7 +708,7 @@ def Sol_ExtFuncConstantOp : Sol_Op<"ext_func_constant", [Pure]> {
 def Sol_ExtFuncSelectorOp : Sol_Op<"ext_func_selector", [Pure]> {
   let summary = "Extracts the selector from an external function reference";
   let arguments = (ins Sol_ExtFuncRefType:$func);
-  let results = (outs Sol_Bytes4SelectorType:$result);
+  let results = (outs Sol_FixedBytes4SelectorType:$result);
   let assemblyFormat = "$func attr-dict `:` qualified(type($func)) `->` type($result)";
 }
 
@@ -847,7 +847,7 @@ def Sol_CallValueOp : Sol_Op<"callvalue"> {
 
 def Sol_SigOp : Sol_Op<"sig"> {
   let summary = "Returns the first four bytes of the calldata (msg.sig)";
-  let results = (outs Sol_BytesType:$val);
+  let results = (outs Sol_FixedBytesType:$val);
 
   let assemblyFormat = "attr-dict `:` qualified(type($val))";
 }
@@ -1166,7 +1166,7 @@ def Sol_StringLitOp : Sol_Op<"string_lit"> {
 def Sol_ConcatOp : Sol_Op<"concat"> {
   let summary = "Concatenate bytes/string values into a new memory string";
   let arguments =
-      (ins Variadic<AnyTypeOf<[Sol_BytesType, Sol_StringType]>>:$args);
+      (ins Variadic<AnyTypeOf<[Sol_FixedBytesType, Sol_StringType]>>:$args);
   let results = (outs Sol_StringType:$result);
 
   let assemblyFormat = "($args^ `:` type($args))? attr-dict `->` type($result)";

@@ -102,7 +102,7 @@ bool AddressCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
       return true;
     if (auto intTy = dyn_cast<IntegerType>(ty))
       return intTy.getWidth() == 160 && intTy.isUnsigned();
-    if (auto bytesTy = dyn_cast<sol::BytesType>(ty))
+    if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty))
       return bytesTy.getSize() == 20;
     return false;
   };
@@ -138,17 +138,17 @@ bool BytesCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
     return false;
 
   // bytes -> bytes.
-  if (isa<BytesType>(inpTy) && isa<BytesType>(outTy))
+  if (isa<FixedBytesType>(inpTy) && isa<FixedBytesType>(outTy))
     return true;
 
   // int -> bytes.
   if (auto inpIntTy = dyn_cast<IntegerType>(inpTy)) {
-    auto outBytesTy = cast<BytesType>(outTy);
+    auto outBytesTy = cast<FixedBytesType>(outTy);
     return inpIntTy.getWidth() == outBytesTy.getSize() * 8;
   }
 
   // bytes -> int.
-  return cast<BytesType>(inpTy).getSize() * 8 ==
+  return cast<FixedBytesType>(inpTy).getSize() * 8 ==
          cast<IntegerType>(outTy).getWidth();
 }
 

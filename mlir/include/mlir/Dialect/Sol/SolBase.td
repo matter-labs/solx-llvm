@@ -68,7 +68,7 @@ def Sol_ContractType : Sol_Type<"Contract", "contract"> {
   let assemblyFormat = [{ `<` $name (`,` $payable^)? `>` }];
 }
 
-def Sol_BytesType : Sol_Type<"Bytes", "bytes"> {
+def Sol_FixedBytesType : Sol_Type<"FixedBytes", "fixedbytes"> {
   let parameters = (ins "uint32_t":$size);
   let assemblyFormat = [{ `<` $size `>` }];
 }
@@ -279,7 +279,7 @@ class Sol_ModOp<string mnemonic, list<Trait> traits = []>
 
 class Sol_HashPreCompileOp<string mnemonic> : Sol_Op<mnemonic> {
   let arguments = (ins Sol_StringType:$data);
-  let results = (outs Sol_BytesType:$result);
+  let results = (outs Sol_FixedBytesType:$result);
 }
 
 #endif // MLIR_DIALECT_SOL_SOLBASE_TD

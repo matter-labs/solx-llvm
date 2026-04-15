@@ -32,7 +32,7 @@ evm::SolTypeConverter::SolTypeConverter() {
   });
 
   // Bytes type
-  addConversion([&](sol::BytesType ty) -> Type {
+  addConversion([&](sol::FixedBytesType ty) -> Type {
     return IntegerType::get(ty.getContext(), /*width=*/256,
                             IntegerType::Signless);
   });

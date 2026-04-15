@@ -119,7 +119,7 @@ Type mlir::sol::getEltType(Type ty, Index structTyIdx) {
     return arrTy.getEltType();
   }
   if (isa<sol::StringType>(ty)) {
-    return sol::BytesType::get(ty.getContext(), /*size=*/1);
+    return sol::FixedBytesType::get(ty.getContext(), /*size=*/1);
   }
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
     return structTy.getMemberTypes()[structTyIdx];
@@ -205,7 +205,7 @@ bool mlir::sol::isAddressLikeType(Type ty) {
 }
 
 unsigned mlir::sol::getStorageSlotCount(Type ty) {
-  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<BytesType>(ty) ||
+  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FixedBytesType>(ty) ||
       isa<MappingType>(ty) || isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) ||
       isa<StringType>(ty) || isAddressLikeType(ty))
     return 1;
@@ -235,7 +235,7 @@ unsigned mlir::sol::getStorageSlotCount(Type ty) {
 
 bool mlir::sol::canBePacked(Type ty) {
   // Scalars can be packed within a slot.
-  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<BytesType>(ty) ||
+  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FixedBytesType>(ty) ||
       isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) || isAddressLikeType(ty))
     return true;
 
@@ -254,7 +254,7 @@ unsigned mlir::sol::getStorageByteSize(Type ty) {
     // Bool occupies 1 byte in storage.
     return intTy.getWidth() == 1 ? 1 : intTy.getWidth() / 8;
 
-  if (auto bytesTy = dyn_cast<BytesType>(ty))
+  if (auto bytesTy = dyn_cast<FixedBytesType>(ty))
     return bytesTy.getSize();
 
   // Enums can have at most 256 members, so always 1 byte.

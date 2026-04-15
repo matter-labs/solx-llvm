@@ -482,7 +482,7 @@ bool canFastCopyCalldataArray(Type eltTy) {
     // TODO: Can we allow signed integers here as well?
     return intTy.getWidth() == 256 && !intTy.isSigned();
 
-  auto bytesTy = dyn_cast<sol::BytesType>(eltTy);
+  auto bytesTy = dyn_cast<sol::FixedBytesType>(eltTy);
   return bytesTy && bytesTy.getSize() == 32;
 }
 
@@ -580,7 +580,7 @@ unsigned evm::getAlignment(Value ptr) {
 
 unsigned evm::getCallDataHeadSize(Type ty) {
   if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
-      isa<sol::BytesType>(ty) || isa<sol::ExtFuncRefType>(ty) ||
+      isa<sol::FixedBytesType>(ty) || isa<sol::ExtFuncRefType>(ty) ||
       sol::hasDynamicallySizedElt(ty) || sol::isAddressLikeType(ty))
     return 32;
 
@@ -677,7 +677,7 @@ Value evm::Builder::normalizeABIScalarForEncoding(
     return normalized;
   }
 
-  if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
     Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
     if (bytesTy.getSize() == 32)
       return casted;
@@ -1002,7 +1002,7 @@ Value evm::Builder::genDataAddrPtr(Value addr, sol::DataLocation dataLoc,
 }
 
 Value evm::Builder::genDynBytesToFixedBytes(Value src, Type srcTy,
-                                            sol::BytesType dstTy,
+                                            sol::FixedBytesType dstTy,
                                             std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
@@ -1207,7 +1207,7 @@ Value evm::Builder::genCleanupPackedStorageValue(
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  if (auto bytesTy = dyn_cast<sol::BytesType>(eltTy)) {
+  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(eltTy)) {
     unsigned numBits = bytesTy.getSize() * 8;
     if (numBits == 256)
       return value;
@@ -1828,7 +1828,7 @@ Value evm::Builder::genPushVoidToString(Value srcAddr,
                                  IntegerType::SignednessSemantics::Signless);
   Type resTy =
       LLVM::LLVMStructType::getLiteral(b.getContext(), {i256Ty, i256Ty});
-  Type bytes1Ty = mlir::sol::BytesType::get(b.getContext(), /*size*/ 1);
+  Type bytes1Ty = mlir::sol::FixedBytesType::get(b.getContext(), /*size*/ 1);
 
   Value isOutOfPlace = b.create<arith::CmpIOp>(
       loc, arith::CmpIPredicate::ugt, oldLength, bExt.genI256Const(31, loc));
@@ -1891,7 +1891,7 @@ Value evm::Builder::genStringItemAddress(Value srcAddr, Value idx,
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  Type bytes1Ty = mlir::sol::BytesType::get(b.getContext(), /*size*/ 1);
+  Type bytes1Ty = mlir::sol::FixedBytesType::get(b.getContext(), /*size*/ 1);
   Value data = genLoad(srcAddr, sol::DataLocation::Storage, loc);
   Value length = genStorageStringLength(data, loc);
 
@@ -2124,7 +2124,7 @@ Value evm::Builder::genABITupleEncoding(
   }
 
   // Bytes type
-  if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
     src = normalizeABIScalarForEncoding(bytesTy, src, loc, srcDataLoc);
     b.create<yul::MStoreOp>(loc, dstAddr, src);
     return tailAddr;
@@ -2475,7 +2475,7 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
   }
 
   // Bytes type.
-  if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
     Value normalized = normalizeABIScalarForEncoding(bytesTy, val, loc);
     b.create<yul::MStoreOp>(loc, addr, normalized);
     return b.create<arith::AddIOp>(loc, addr,
@@ -2505,8 +2505,8 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
         eltTy = nestedArrTy.getEltType();
       }
       return isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
-             isa<sol::BytesType>(eltTy) || isa<sol::ExtFuncRefType>(eltTy) ||
-             sol::isAddressLikeType(eltTy);
+             isa<sol::FixedBytesType>(eltTy) ||
+             isa<sol::ExtFuncRefType>(eltTy) || sol::isAddressLikeType(eltTy);
     };
 
     // TODO: Move packed array element type validation to a verifier.
@@ -2683,7 +2683,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
   }
 
   // Bytes type
-  if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
     Value arg = genLoad(addr);
     if (bytesTy.getSize() != 32) {
       assert(bytesTy.getSize() < 32);

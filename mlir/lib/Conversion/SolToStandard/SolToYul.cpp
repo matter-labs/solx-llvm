@@ -168,9 +168,9 @@ struct AddressCastOpLowering : public OpConversionPattern<sol::AddressCastOp> {
     Type inpTy = op.getInp().getType();
     Type outTy = op.getType();
 
-    if (isa<sol::BytesType>(inpTy) || isa<sol::BytesType>(outTy)) {
+    if (isa<sol::FixedBytesType>(inpTy) || isa<sol::FixedBytesType>(outTy)) {
       // bytes20 -> address
-      if (auto inpBytesTy = dyn_cast<sol::BytesType>(inpTy)) {
+      if (auto inpBytesTy = dyn_cast<sol::FixedBytesType>(inpTy)) {
         assert(inpBytesTy.getSize() == 20 &&
                "AddressCastOp only supports bytes20");
         assert(isa<sol::AddressType>(outTy));
@@ -180,7 +180,7 @@ struct AddressCastOpLowering : public OpConversionPattern<sol::AddressCastOp> {
       }
 
       // address -> bytes20
-      auto outBytesTy = cast<sol::BytesType>(outTy);
+      auto outBytesTy = cast<sol::FixedBytesType>(outTy);
       assert(outBytesTy.getSize() == 20 &&
              "AddressCastOp only supports bytes20");
       assert(isa<sol::AddressType>(inpTy));
@@ -279,8 +279,8 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
     Type outTy = op.getType();
 
     // Bytes to bytes
-    if (auto inpBytesTy = dyn_cast<sol::BytesType>(inpTy)) {
-      if (auto outBytesTy = dyn_cast<sol::BytesType>(outTy)) {
+    if (auto inpBytesTy = dyn_cast<sol::FixedBytesType>(inpTy)) {
+      if (auto outBytesTy = dyn_cast<sol::FixedBytesType>(outTy)) {
         unsigned keepBytes = inpBytesTy.getSize() < outBytesTy.getSize()
                                  ? inpBytesTy.getSize()
                                  : outBytesTy.getSize();
@@ -301,7 +301,7 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
 
     // Int to bytes
     assert(isa<IntegerType>(inpTy));
-    auto outBytesTy = cast<sol::BytesType>(outTy);
+    auto outBytesTy = cast<sol::FixedBytesType>(outTy);
     Value inpAsI256 =
         bExt.genIntCast(/*width=*/256, /*isSigned=*/false, adaptor.getInp());
     auto shiftAmt = bExt.genI256Const(256 - (8 * outBytesTy.getSize()));
@@ -319,7 +319,7 @@ struct DynBytesToFixedBytesOpLowering
                                 OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
     evm::Builder evmB(getModule(op), r, op.getLoc());
-    auto dstTy = cast<sol::BytesType>(op.getType());
+    auto dstTy = cast<sol::FixedBytesType>(op.getType());
     r.replaceOp(op, evmB.genDynBytesToFixedBytes(adaptor.getInp(),
                                                  op.getInp().getType(), dstTy,
                                                  op.getLoc()));
@@ -1315,7 +1315,7 @@ struct CmpOpLowering : public OpConversionPattern<sol::CmpOp> {
 
     if (auto intTy = dyn_cast<IntegerType>(cmpTy)) {
       isSigned = intTy.isSigned();
-    } else if (auto bytesTy = dyn_cast<sol::BytesType>(cmpTy)) {
+    } else if (auto bytesTy = dyn_cast<sol::FixedBytesType>(cmpTy)) {
       unsigned cmpWidth = bytesTy.getSize() * 8;
       if (cmpWidth < 256) {
         Value shiftAmt = bExt.genI256Const(256 - cmpWidth);
@@ -1444,7 +1444,7 @@ struct ConcatOpLowering : public OpConversionPattern<sol::ConcatOp> {
     Value currDst = dstStart;
     for (auto [origSrc, src] : llvm::zip(op.getArgs(), adaptor.getArgs())) {
       Type ty = origSrc.getType();
-      if (auto bytesTy = dyn_cast<sol::BytesType>(ty)) {
+      if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
         // bytesN values are left-aligned in an i256 with trailing bytes zeroed
         // by invariant. On the other hand, solc applies maks on the trailing
         // bytes. See solx-solidity, #78.
@@ -1544,7 +1544,7 @@ struct PushStringOpLowering : public OpConversionPattern<sol::PushStringOp> {
     // Solc clears the most significant bytes using and 0xff, however LLVM DAG
     // legalization handles this automatically when legalizing zext i8 to i256.
     Value byte =
-        isa<sol::BytesType>(inpValueTy)
+        isa<sol::FixedBytesType>(inpValueTy)
             ? r.create<arith::ShRUIOp>(loc, castedVal, bExt.genI256Const(248))
                   .getResult()
             : castedVal;
@@ -1908,7 +1908,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
     case sol::DataLocation::CallData:
     case sol::DataLocation::Memory: {
       auto addrTy = cast<sol::PointerType>(op.getAddr().getType());
-      auto bytesEleTy = dyn_cast<sol::BytesType>(addrTy.getPointeeType());
+      auto bytesEleTy = dyn_cast<sol::FixedBytesType>(addrTy.getPointeeType());
       // If loading from `bytes`, generate the low bits mask-off of the loaded
       // value.
       if (bytesEleTy) {
@@ -2025,7 +2025,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
       sol::DataLocation dataLoc = sol::getDataLocation(addrTy);
 
       // Generate mstore8 for storing to `bytes`.
-      auto bytesEleTy = dyn_cast<sol::BytesType>(sol::getEltType(addrTy));
+      auto bytesEleTy = dyn_cast<sol::FixedBytesType>(sol::getEltType(addrTy));
       if (bytesEleTy && dataLoc == sol::DataLocation::Memory) {
         assert(bytesEleTy.getSize() == 1 && "NYI");
         auto byteVal =
@@ -2078,7 +2078,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         // This tracks the value we prepare to be stored.
         Value preparedVal;
         unsigned numBits;
-        if (auto bytesTy = dyn_cast<sol::BytesType>(eltTy)) {
+        if (auto bytesTy = dyn_cast<sol::FixedBytesType>(eltTy)) {
           // BytesType: shr to convert from MSB-aligned to LSB-aligned.
           numBits = bytesTy.getSize() * 8;
           preparedVal = r.create<arith::ShRUIOp>(
