@@ -116,6 +116,11 @@ struct ImmutableResource
   StringRef getName() final { return "<Immutable>"; }
 };
 
+struct ValidationResource
+    : public SideEffects::Resource::Base<ValidationResource> {
+  StringRef getName() final { return "<Validation>"; }
+};
+
 mlir::SideEffects::Resource *getResource(DataLocation dataLoc);
 
 } // namespace sol

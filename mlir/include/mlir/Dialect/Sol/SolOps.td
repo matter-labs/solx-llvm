@@ -350,7 +350,7 @@ def Sol_CopyOp : Sol_Op<"copy"> {
 // TODO: Simplify the asm format by inferring element type of Sol_RefType.
 
 def Sol_LoadOp : Sol_Op<"load", [
-  AlwaysSpeculatable,
+  DeclareOpInterfaceMethods<ConditionallySpeculatable>,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]
 >{
   let arguments = (ins Sol_RefType:$addr);
