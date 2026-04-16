@@ -1337,6 +1337,20 @@ struct CmpOpLowering : public OpConversionPattern<sol::CmpOp> {
       APInt mask = APInt::getLowBitsSet(256, 160);
       lhs = r.create<arith::AndIOp>(loc, lhs, bExt.genI256Const(mask));
       rhs = r.create<arith::AndIOp>(loc, rhs, bExt.genI256Const(mask));
+    } else if (isa<sol::ExtFuncRefType>(cmpTy)) {
+      // External function references are represented as
+      //   i256: | address (160) | selector (32) | zeros (64) |
+      // Two ext-func-refs are equal iff both address and selector match.
+      // The lower 64 bits are always zero (normalized).
+      APInt mask = APInt::getHighBitsSet(256, 192);
+      lhs = r.create<arith::AndIOp>(loc, lhs, bExt.genI256Const(mask));
+      rhs = r.create<arith::AndIOp>(loc, rhs, bExt.genI256Const(mask));
+    } else if (isa<sol::FuncRefType>(cmpTy)) {
+      // Internal function references are 64-bit code pointers stored
+      // right-aligned in the lower 64 bits of an i256.
+      APInt mask = APInt::getLowBitsSet(256, 64);
+      lhs = r.create<arith::AndIOp>(loc, lhs, bExt.genI256Const(mask));
+      rhs = r.create<arith::AndIOp>(loc, rhs, bExt.genI256Const(mask));
     } else if (!isa<sol::EnumType>(cmpTy)) {
       llvm_unreachable("Unexpected type for comparison");
     }

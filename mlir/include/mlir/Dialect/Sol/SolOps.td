@@ -178,10 +178,10 @@ def Sol_EcrecoverOp : Sol_Op<"ecrecover"> {
 
 def Sol_CmpOp : Sol_Op<"cmp", [Pure, SameTypeOperands]> {
   let arguments = (ins Sol_CmpPredicateAttr:$predicate,
-                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType,
-                                  Sol_FixedBytesType]>:$lhs,
-                       AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType,
-                                  Sol_FixedBytesType]>:$rhs);
+      AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType, Sol_FixedBytesType,
+                 Sol_ExtFuncRefType, Sol_FuncRefType]>:$lhs,
+      AnyTypeOf<[Sol_Int, Sol_AddressType, Sol_ContractType, Sol_FixedBytesType,
+                 Sol_ExtFuncRefType, Sol_FuncRefType]>:$rhs);
   let results = (outs I1:$result);
 
   let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs)";
