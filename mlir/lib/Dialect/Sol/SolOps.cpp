@@ -207,11 +207,44 @@ void AllocaOp::print(OpAsmPrinter &p) { printAllocationOp(*this, p); }
 // LoadOp
 //===----------------------------------------------------------------------===//
 
+namespace {
+static SideEffects::Resource *getValidationResource() {
+  static mlir::sol::ValidationResource resource;
+  return &resource;
+}
+
+// Return true if the load may trap, i.e., if the loaded value
+// can be outside the valid range.
+static bool mayTrapOnLoad(sol::LoadOp op) {
+  auto ptrTy = cast<PointerType>(op.getAddr().getType());
+  Type ty = ptrTy.getPointeeType();
+  DataLocation dataLoc = ptrTy.getDataLocation();
+
+  if (dataLoc == DataLocation::CallData) {
+    if (auto intTy = dyn_cast<IntegerType>(ty))
+      return intTy.getWidth() < 256;
+    if (auto bytesTy = dyn_cast<FixedBytesType>(ty))
+      return bytesTy.getSize() < 32;
+    return isa<EnumType>(ty) || isAddressLikeType(ty) ||
+           isa<ExtFuncRefType>(ty);
+  }
+  return dataLoc == DataLocation::Memory && isa<EnumType>(ty);
+}
+} // namespace
+
 void LoadOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   effects.emplace_back(MemoryEffects::Read::get(), &getAddrMutable(),
                        getResource(getDataLocation(getAddr().getType())));
+  if (mayTrapOnLoad(*this))
+    effects.emplace_back(MemoryEffects::Write::get(), Attribute{},
+                         getValidationResource());
+}
+
+Speculation::Speculatability LoadOp::getSpeculatability() {
+  return mayTrapOnLoad(*this) ? Speculation::NotSpeculatable
+                              : Speculation::Speculatable;
 }
 
 //===----------------------------------------------------------------------===//
