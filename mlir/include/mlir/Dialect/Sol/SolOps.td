@@ -1161,7 +1161,7 @@ def Sol_ContractOp : Sol_Op<"contract", [Symbol, SymbolTable, SingleBlock,
 
 def Sol_StringLitOp : Sol_Op<"string_lit"> {
   let arguments = (ins StrAttr:$value);
-  let results = (outs Sol_StringType:$addr);
+  let results = (outs Res<Sol_StringType, "", [MemAlloc]>:$addr);
   let assemblyFormat = "$value attr-dict `->` qualified(type($addr))";
 }
 
