@@ -128,16 +128,16 @@ public:
   Value genMemAlloc(Type ty, bool zeroInit, ValueRange initVals, Value sizeVar,
                     std::optional<Location> locArg = std::nullopt);
 
-private:
-  Value genMemAlloc(Type ty, bool zeroInit, ValueRange initVals, Value sizeVar,
-                    int64_t recDepth,
-                    std::optional<Location> locArg = std::nullopt);
-
   /// Returns a normalized scalar value for ABI encoding and emits range checks
   /// to match Yul cleanup/validator behavior.
   Value normalizeABIScalarForEncoding(
       Type ty, Value val, Location loc,
       std::optional<sol::DataLocation> srcDataLoc = std::nullopt);
+
+private:
+  Value genMemAlloc(Type ty, bool zeroInit, ValueRange initVals, Value sizeVar,
+                    int64_t recDepth,
+                    std::optional<Location> locArg = std::nullopt);
 
   /// Zeroes storage slots in the out-of-place data area of a storage
   /// string/bytes at \p dstAddr that are no longer needed when the content

@@ -1938,11 +1938,11 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
     Value addr = adaptor.getAddr();
     sol::DataLocation dataLoc = sol::getDataLocation(op.getAddr().getType());
     auto i256Ty = r.getIntegerType(256);
+    Type eltTy =
+        cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
 
     switch (dataLoc) {
     case sol::DataLocation::Stack: {
-      Type eltTy =
-          cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
       Type loadTy = getTypeConverter()->convertType(eltTy);
       assert(loadTy);
       r.replaceOpWithNewOp<LLVM::LoadOp>(op, loadTy, addr,
@@ -1951,40 +1951,34 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
     }
     case sol::DataLocation::CallData:
     case sol::DataLocation::Memory: {
-      auto addrTy = cast<sol::PointerType>(op.getAddr().getType());
-      Type pointeeTy = addrTy.getPointeeType();
-
-      // If loading from `bytes`, generate the low bits mask-off of the loaded
-      // value.
-      if (sol::isBytesLikeType(pointeeTy)) {
-        unsigned numBits = sol::getBytesSize(pointeeTy) * 8;
-        APInt mask(/*numBits=*/256, 0);
-        assert(numBits <= 256);
-        mask.setHighBits(numBits);
-        auto load = evmB.genLoad(addr, dataLoc);
-        r.replaceOpWithNewOp<arith::AndIOp>(op, load, bExt.genI256Const(mask));
-        return success();
-      }
-
       auto ld = evmB.genLoad(addr, dataLoc);
-      if (sol::isAddressLikeType(op.getType())) {
-        APInt mask = APInt::getLowBitsSet(256, 160);
-        r.replaceOpWithNewOp<arith::AndIOp>(op, ld, bExt.genI256Const(mask));
-        return success();
-      }
-      if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
+
+      if (isa<sol::ByteType>(eltTy)) {
+        APInt mask = APInt::getHighBitsSet(256, 8);
+        ld = r.create<arith::AndIOp>(loc, ld, bExt.genI256Const(mask));
+      } else if (isa<sol::EnumType>(eltTy) || sol::isAddressLikeType(eltTy) ||
+                 isa<sol::FixedBytesType>(eltTy) ||
+                 isa<sol::ExtFuncRefType>(eltTy)) {
+        ld = evmB.normalizeABIScalarForEncoding(eltTy, ld, loc, dataLoc);
+      } else if (auto intTy = dyn_cast<IntegerType>(eltTy)) {
+        // We can't call normalizeABIScalarForEncoding here as it returns
+        // i256, but we need to preserve the original bitwidth.
         Value castedRes = bExt.genIntCastWithBoolCleanup(
             intTy.getWidth(), intTy.isSigned(), ld, loc);
-        r.replaceOp(op, castedRes);
-        return success();
+        if (dataLoc == sol::DataLocation::CallData && intTy.getWidth() < 256) {
+          Value normalized =
+              bExt.genIntCast(/*width=*/256, intTy.isSigned(), castedRes, loc);
+          Value revertCond = r.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::ne, ld, normalized);
+          evmB.genRevert(revertCond, loc);
+        }
+        ld = castedRes;
       }
       r.replaceOp(op, ld);
       return success();
     }
     case sol::DataLocation::Storage:
     case sol::DataLocation::Transient: {
-      Type eltTy =
-          cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
 
       // Helper to emit sload or tload based on data location.
       auto genSlotLoad = [&](Value slot) -> Value {
@@ -2058,6 +2052,8 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
     Value remappedVal = adaptor.getVal();
     Value remappedAddr = adaptor.getAddr();
     sol::DataLocation dataLoc = sol::getDataLocation(op.getAddr().getType());
+    Type eltTy =
+        cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
 
     switch (dataLoc) {
     case sol::DataLocation::Stack:
@@ -2066,11 +2062,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
       return success();
     case sol::DataLocation::Immutable:
     case sol::DataLocation::Memory: {
-      Type addrTy = op.getAddr().getType();
-      sol::DataLocation dataLoc = sol::getDataLocation(addrTy);
-
       // Generate mstore8 for storing to `bytes`.
-      Type eltTy = sol::getEltType(addrTy);
       if (isa<sol::ByteType>(eltTy) && dataLoc == sol::DataLocation::Memory) {
         auto byteVal =
             r.create<yul::ByteOp>(loc, bExt.genI256Const(0), remappedVal);
@@ -2078,30 +2070,18 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         return success();
       }
 
-      if (sol::isAddressLikeType(op.getVal().getType())) {
-        APInt mask = APInt::getLowBitsSet(256, 160);
-        Value canonicalAddr =
-            r.create<arith::AndIOp>(loc, remappedVal, bExt.genI256Const(mask));
-        evmB.genStore(canonicalAddr, remappedAddr, dataLoc);
-        r.eraseOp(op);
-        return success();
-      }
+      if (isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
+          sol::isAddressLikeType(eltTy) || isa<sol::FixedBytesType>(eltTy) ||
+          isa<sol::ExtFuncRefType>(eltTy))
+        remappedVal =
+            evmB.normalizeABIScalarForEncoding(eltTy, remappedVal, loc);
 
-      if (auto intTy = dyn_cast<IntegerType>(op.getVal().getType())) {
-        Value castedVal =
-            bExt.genIntCast(/*width=*/256, intTy.isSigned(), remappedVal);
-        evmB.genStore(castedVal, remappedAddr, dataLoc);
-        r.eraseOp(op);
-        return success();
-      }
       evmB.genStore(remappedVal, remappedAddr, dataLoc);
       r.eraseOp(op);
       return success();
     }
     case sol::DataLocation::Storage:
     case sol::DataLocation::Transient: {
-      Type eltTy =
-          cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
       auto i256Ty = r.getIntegerType(256);
 
       // Helper to create sstore or tstore based on data location.
