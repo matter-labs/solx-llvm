@@ -1498,6 +1498,30 @@ struct GetCallDataOpLowering : public OpConversionPattern<sol::GetCallDataOp> {
   }
 };
 
+struct DefaultCallDataOpLowering
+    : public OpConversionPattern<sol::DefaultCallDataOp> {
+  using OpConversionPattern<sol::DefaultCallDataOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::DefaultCallDataOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    mlir::solgen::BuilderExt bExt(r, op.getLoc());
+    Value zero = bExt.genI256Const(0);
+
+    Value callDataSz = r.create<yul::CallDataSizeOp>(op.getLoc());
+
+    // Fat pointer types get an empty slice: {calldatasize(), 0}.
+    Type convertedTy = getTypeConverter()->convertType(op.getType());
+    if (isa<LLVM::LLVMStructType>(convertedTy)) {
+      r.replaceOp(op, bExt.genLLVMStruct({callDataSz, zero}));
+      return success();
+    }
+    // Scalar calldata types (e.g. structs) default to calldatasize() -
+    // an offset past valid calldata.
+    r.replaceOp(op, callDataSz);
+    return success();
+  }
+};
+
 struct PushOpLowering : public OpConversionPattern<sol::PushOp> {
   using OpConversionPattern<sol::PushOp>::OpConversionPattern;
 
@@ -1822,11 +1846,20 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
         // Memory/calldata struct
       } else if (auto structTy = dyn_cast<sol::StructType>(baseAddrTy)) {
         auto idxConstOp = cast<arith::ConstantIntOp>(idx.getDefiningOp());
+        uint64_t fieldIdx = idxConstOp.value();
         Value memberIdx =
             bExt.genIntCast(/*width=*/256, /*isSigned=*/false, idxConstOp);
         auto scaledIdx =
             r.create<arith::MulIOp>(loc, memberIdx, bExt.genI256Const(32));
         res = r.create<arith::AddIOp>(loc, remappedBaseAddr, scaledIdx);
+
+        // For calldata structs, resolve ABI relative-offset for dynamic
+        // members.
+        if (dataLoc == sol::DataLocation::CallData) {
+          Type memberTy = structTy.getMemberTypes()[fieldIdx];
+          if (sol::hasDynamicallySizedElt(memberTy))
+            res = evmB.genCalldataEltAddr(res, remappedBaseAddr, memberTy, loc);
+        }
 
         // Bytes (!sol.string)
       } else if (auto strTy = dyn_cast<sol::StringType>(baseAddrTy)) {
@@ -4051,11 +4084,12 @@ void evm::populateCryptoPats(mlir::RewritePatternSet &pats,
 
 void evm::populateMemPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<AllocaOpLowering, MallocOpLowering, ArrayLitOpLowering,
-           GetCallDataOpLowering, PushOpLowering, PopOpLowering, GepOpLowering,
-           MapOpLowering, LoadOpLowering, LoadImmutableOpLowering,
-           StoreOpLowering, DataLocCastOpLowering, LengthOpLowering,
-           SliceOpLowering, CopyOpLowering, PushStringOpLowering,
-           StringLitOpLowering, ConcatOpLowering>(tyConv, pats.getContext());
+           GetCallDataOpLowering, DefaultCallDataOpLowering, PushOpLowering,
+           PopOpLowering, GepOpLowering, MapOpLowering, LoadOpLowering,
+           LoadImmutableOpLowering, StoreOpLowering, DataLocCastOpLowering,
+           LengthOpLowering, SliceOpLowering, CopyOpLowering,
+           PushStringOpLowering, StringLitOpLowering, ConcatOpLowering>(
+      tyConv, pats.getContext());
   pats.add<AddrOfOpLowering>(pats.getContext());
 }
 

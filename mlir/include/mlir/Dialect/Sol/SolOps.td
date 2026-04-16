@@ -680,6 +680,19 @@ def Sol_ModifierOp : Sol_Op<"modifier",
 // TODO: Move function ops to another dialect
 //
 
+def Sol_DefaultCallDataOp : Sol_Op<"default_calldata", [Pure]> {
+  let summary = "Default value for a calldata aggregate type";
+  let results = (outs Sol_AggType:$result);
+
+  let builders = [
+    OpBuilder<(ins "::mlir::Type":$type), [{
+      $_state.addTypes(type);
+    }]>
+  ];
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
 def Sol_DefaultFuncConstantOp : Sol_Op<"default_func_constant", [Pure]> {
   let results = (outs AnyType:$addr);
 
