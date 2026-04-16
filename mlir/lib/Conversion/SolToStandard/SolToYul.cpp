@@ -2038,8 +2038,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
 
       // Generate mstore8 for storing to `bytes`.
       Type eltTy = sol::getEltType(addrTy);
-      if (sol::isBytesLikeType(eltTy) && dataLoc == sol::DataLocation::Memory) {
-        assert(sol::getBytesSize(eltTy) == 1 && "NYI");
+      if (isa<sol::ByteType>(eltTy) && dataLoc == sol::DataLocation::Memory) {
         auto byteVal =
             r.create<yul::ByteOp>(loc, bExt.genI256Const(0), remappedVal);
         r.replaceOpWithNewOp<yul::MStore8Op>(op, remappedAddr, byteVal);
