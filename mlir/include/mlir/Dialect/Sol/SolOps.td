@@ -946,6 +946,7 @@ def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
                        UI256:$selector,
                        UnitAttr:$try_call, UnitAttr:$static_call,
                        UnitAttr:$delegate_call,
+                       UnitAttr:$library_call,
                        TypeAttrOf<FunctionType>:$callee_type,
                        OptionalAttr<DictArrayAttr>:$arg_attrs,
                        OptionalAttr<DictArrayAttr>:$res_attrs);
