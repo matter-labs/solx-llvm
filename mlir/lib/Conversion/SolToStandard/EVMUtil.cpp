@@ -2975,7 +2975,7 @@ void evm::Builder::genDebugRevertWithMsg(Value cond, std::string const &msg,
 
 void evm::Builder::genUserRevertWithMsg(std::string const &msg,
                                         std::optional<mlir::Location> locArg) {
-  if (sol::shouldKeepUserRevertStrings(mod) && !msg.empty())
+  if (sol::shouldKeepUserRevertStrings(mod))
     genRevertWithMsg(msg, locArg);
   else
     genRevert(locArg);
@@ -2983,7 +2983,7 @@ void evm::Builder::genUserRevertWithMsg(std::string const &msg,
 
 void evm::Builder::genUserRevertWithMsg(Value cond, std::string const &msg,
                                         std::optional<mlir::Location> locArg) {
-  if (sol::shouldKeepUserRevertStrings(mod) && !msg.empty())
+  if (sol::shouldKeepUserRevertStrings(mod))
     genRevertWithMsg(cond, msg, locArg);
   else
     genRevert(cond, locArg);

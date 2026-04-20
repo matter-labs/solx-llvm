@@ -3285,16 +3285,16 @@ struct RequireOpLowering : public OpConversionPattern<sol::RequireOp> {
     mlir::Value negCond = r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
                                                   op.getCond(), falseVal);
     if (op.getCall()) {
-      assert(!op.getMsg().empty());
+      assert(op.getMsg());
       evmB.genRevert(negCond, op.getArgs().getTypes(), adaptor.getArgs(),
-                     op.getMsg());
+                     *op.getMsg());
       r.eraseOp(op);
       return success();
     }
 
     // Generate the revert.
-    if (!op.getMsg().empty())
-      evmB.genUserRevertWithMsg(negCond, op.getMsg().str());
+    if (op.getMsg())
+      evmB.genUserRevertWithMsg(negCond, op.getMsg()->str());
     else
       evmB.genRevert(negCond);
 

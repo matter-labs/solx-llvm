@@ -496,11 +496,11 @@ def Sol_AssertOp : Sol_Op<"assert"> {
 
 def Sol_RequireOp : Sol_Op<"require"> {
   // $msg represents the error call's signature if $call is set.
-  let arguments = (ins I1:$cond, StrAttr:$msg,
+  let arguments = (ins I1:$cond, OptionalAttr<StrAttr>:$msg,
                        Variadic<AnyType>:$args, UnitAttr:$call);
 
   let assemblyFormat = [{
-    $cond `,` $msg `(` ($args^ `:` type($args))? `)` attr-dict
+    $cond (`,` $msg^)? `(` ($args^ `:` type($args))? `)` attr-dict
   }];
 }
 
