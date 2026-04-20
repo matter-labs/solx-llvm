@@ -35,6 +35,33 @@ using namespace mlir;
 
 namespace {
 
+// Compute the types to hand to the generic ABI helpers.
+//
+// For normal ABI calls we keep the original source types, because the encoder
+// still needs to know where values come from (for example storage or calldata
+// when copying into memory ABI form).
+//
+// Library ABI is special only when the boundary type itself is a storage ref,
+// in which case we need to use the uint256 type.
+SmallVector<Type> getABITypes(OpBuilder &b, TypeRange sourceTys,
+                              TypeRange boundaryTys, bool useLibraryABI) {
+  assert(sourceTys.size() == boundaryTys.size() &&
+         "expected source and boundary types to align");
+
+  if (!useLibraryABI)
+    return SmallVector<Type>(sourceTys);
+
+  SmallVector<Type> mappedTys;
+  mappedTys.reserve(boundaryTys.size());
+  for (auto [sourceTy, boundaryTy] : llvm::zip(sourceTys, boundaryTys)) {
+    if (sol::getDataLocation(boundaryTy) == sol::DataLocation::Storage)
+      mappedTys.push_back(b.getIntegerType(256));
+    else
+      mappedTys.push_back(sourceTy);
+  }
+  return mappedTys;
+}
+
 template <typename OpT>
 static ModuleOp getModule(OpT op) {
   ModuleOp mod = op->template getParentOfType<ModuleOp>();
@@ -2669,9 +2696,16 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
     // - The generated code for the return has returndatacopy and returnsize.
     assert(sol::evmSupportsReturnData(mod) && "NYI");
 
+    SmallVector<Type> abiInputTys =
+        getABITypes(r, op.getIns().getTypes(), op.getCalleeType().getInputs(),
+                    op.getLibraryCall());
+    SmallVector<Type> abiResultTys =
+        getABITypes(r, op.getCalleeType().getResults(),
+                    op.getCalleeType().getResults(), op.getLibraryCall());
+
     // Check if we need to generate the extcodesize check.
     unsigned totHeadSize = 0;
-    for (auto resTy : op.getCalleeType().getResults()) {
+    for (auto resTy : abiResultTys) {
       totHeadSize += evm::getCallDataHeadSize(resTy);
     }
 
@@ -2697,14 +2731,14 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
     // Generate the abi encoding code.
     Value tupleStart =
         r.create<arith::AddIOp>(loc, selectorAddr, bExt.genI256Const(4));
-    Value tupleEnd = evmB.genABITupleEncoding(op.getIns().getType(),
-                                              adaptor.getIns(), tupleStart);
+    Value tupleEnd =
+        evmB.genABITupleEncoding(abiInputTys, adaptor.getIns(), tupleStart);
 
     // Calculate the return size statically and/or check if it's dynamic. This
     // is copied from solidity::frontend::ReturnInfo.
     unsigned staticRetSizeVal = 0;
     bool isRetSizeDynamic = false;
-    for (Type ty : op.getCalleeType().getResults()) {
+    for (Type ty : abiResultTys) {
       if (sol::isDynamicallySized(ty)) {
         isRetSizeDynamic = true;
         staticRetSizeVal = 0;
@@ -2779,8 +2813,8 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
                                       retDataSize);
       evmB.genFreePtrUpd(selectorAddr, retDataSize);
       Value tupleEnd = r.create<arith::AddIOp>(loc, selectorAddr, retDataSize);
-      evmB.genABITupleDecoding(op.getCalleeType().getResults(), selectorAddr,
-                               tupleEnd, decodedResults, /*fromMem=*/true);
+      evmB.genABITupleDecoding(abiResultTys, selectorAddr, tupleEnd,
+                               decodedResults, /*fromMem=*/true);
     } else {
       // See https://github.com/ethereum/solidity/pull/12684
       Value staticRetSizeGreater = r.create<arith::CmpIOp>(
@@ -2801,8 +2835,8 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
       r.create<scf::YieldOp>(loc, tupleEnd);
 
       r.setInsertionPointAfter(ifOp);
-      evmB.genABITupleDecoding(op.getCalleeType().getResults(), selectorAddr,
-                               ifOp.getResult(0), decodedResults,
+      evmB.genABITupleDecoding(abiResultTys, selectorAddr, ifOp.getResult(0),
+                               decodedResults,
                                /*fromMem=*/true);
     }
     r.create<scf::YieldOp>(loc, decodedResults);
@@ -2981,6 +3015,7 @@ struct ExtICallOpLowering : public OpConversionPattern<sol::ExtICallOp> {
                                             /*try_call=*/op.getTryCall(),
                                             /*static_call=*/op.getStaticCall(),
                                             /*delegate_call=*/false,
+                                            /*library_call=*/false,
                                             /*callee_type=*/calleeType,
                                             /*arg_attrs=*/ArrayAttr{},
                                             /*res_attrs=*/ArrayAttr{});
@@ -3768,13 +3803,18 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
 
       // Decode the input parameters (if required).
       FunctionType origIfcFnTy = *ifcFnOp.getOrigFnType();
+      SmallVector<Type> abiInputTys =
+          getABITypes(r, origIfcFnTy.getInputs(), origIfcFnTy.getInputs(),
+                      contrOp.getKind() == sol::ContractKind::Library);
+      SmallVector<Type> abiResultTys =
+          getABITypes(r, origIfcFnTy.getResults(), origIfcFnTy.getResults(),
+                      contrOp.getKind() == sol::ContractKind::Library);
       std::vector<Value> decodedArgs;
-      if (!origIfcFnTy.getInputs().empty()) {
-        evmB.genABITupleDecoding(origIfcFnTy.getInputs(),
+      if (!abiInputTys.empty())
+        evmB.genABITupleDecoding(abiInputTys,
                                  /*tupleStart=*/bExt.genI256Const(4),
                                  /*tupleEnd=*/callDataSz, decodedArgs,
                                  /*fromMem=*/false);
-      }
 
       // Generate the actual call.
       auto callOp = r.create<sol::CallOp>(loc, ifcFnOp, decodedArgs);
@@ -3784,7 +3824,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       mlir::Value tupleSize;
       if (!callOp.getResultTypes().empty()) {
         auto tupleEnd = evmB.genABITupleEncoding(
-            origIfcFnTy.getResults(), callOp.getResults(), tupleStart);
+            abiResultTys, callOp.getResults(), tupleStart);
         tupleSize = r.create<arith::SubIOp>(loc, tupleEnd, tupleStart);
       } else {
         tupleSize = bExt.genI256Const(0);
