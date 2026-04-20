@@ -217,6 +217,13 @@ public:
                              bool isDataLeftAligned = false,
                              std::optional<Location> locArg = std::nullopt);
 
+  /// Returns {slot, byteOffset} for an element at \p idx in a packed storage
+  /// array rooted at \p baseSlot, where elements are \p eltByteSize bytes each.
+  std::pair<Value, Value>
+  genPackedStorageAddrPair(Value baseSlot, Value idx, unsigned eltByteSize,
+                           bool isDataLeftAligned = false,
+                           std::optional<Location> locArg = std::nullopt);
+
   /// Loads slot and punches hole: and(sload/tload(slot), holeMask)
   /// where holeMask = not(ones(numBits) << shiftBits)
   Value genPunchHole(Value slot, Value shiftBits, unsigned numBits,

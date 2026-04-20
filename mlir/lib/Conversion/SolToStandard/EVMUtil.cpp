@@ -1452,10 +1452,10 @@ Value evm::Builder::genCalldataAccessRef(Type ty, Value baseAddr, Value ptr,
   llvm_unreachable("Unexpected dynamically encoded calldata reference");
 }
 
-static std::pair<Value, Value>
-genPackedStorageAddrPair(OpBuilder b, Value baseSlot, Value idx,
-                         unsigned eltByteSize, bool isDataLeftAligned,
-                         Location loc) {
+std::pair<Value, Value> evm::Builder::genPackedStorageAddrPair(
+    Value baseSlot, Value idx, unsigned eltByteSize, bool isDataLeftAligned,
+    std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
   // Consider that the slot may not be fully packed, e.g.,
@@ -1481,7 +1481,7 @@ Value evm::Builder::genPackedStorageAddr(Value baseSlot, Value idx, Type eltTy,
   mlir::solgen::BuilderExt bExt(b, loc);
 
   auto [slot, byteOffset] = genPackedStorageAddrPair(
-      b, baseSlot, idx, sol::getStorageByteSize(eltTy), isDataLeftAligned, loc);
+      baseSlot, idx, sol::getStorageByteSize(eltTy), isDataLeftAligned, loc);
   return bExt.genLLVMStruct({slot, byteOffset});
 }
 
@@ -2119,7 +2119,7 @@ void evm::Builder::genPushToString(Value srcAddr, Value value,
     b.create<yul::SStoreOp>(loc, srcAddr, newLength);
     Value dataPtr = genDataAddrPtr(srcAddr, sol::DataLocation::Storage, loc);
     auto [slotNum, offset] =
-        genPackedStorageAddrPair(b, dataPtr, oldLength, /*eltByteSize*/ 1,
+        genPackedStorageAddrPair(dataPtr, oldLength, /*eltByteSize*/ 1,
                                  /*isDataLeftAligned*/ true, loc);
     Value slotVal = genLoad(slotNum, sol::DataLocation::Storage, loc);
     Value updatedSlot =
@@ -2324,7 +2324,7 @@ void evm::Builder::genPopString(Value srcAddr, Value oldData, Value length,
     {
       Value dataPtr = genDataAddrPtr(srcAddr, sol::DataLocation::Storage, loc);
       auto [slotNum, offset] =
-          genPackedStorageAddrPair(b, dataPtr, newLen, /*eltByteSize*/ 1,
+          genPackedStorageAddrPair(dataPtr, newLen, /*eltByteSize*/ 1,
                                    /*isDataLeftAligned*/ true, loc);
       Value slot = genLoad(slotNum, sol::DataLocation::Storage, loc);
       Value updatedSlot =

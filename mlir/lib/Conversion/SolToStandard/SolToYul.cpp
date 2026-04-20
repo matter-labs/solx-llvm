@@ -1659,7 +1659,6 @@ struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
     }
 
     Value newSize = r.create<arith::SubIOp>(loc, oldSize, bExt.genI256Const(1));
-    r.create<yul::SStoreOp>(loc, slot, newSize);
     Value dataSlot = evmB.genDataAddrPtr(slot, sol::DataLocation::Storage);
 
     // Get element type from the input type.
@@ -1670,20 +1669,15 @@ struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
       llvm_unreachable("");
     }
 
-    // Zero the deleted element.
+    // Zero the deleted element before writing the new length, matching the
+    // Yul reference order.
     if (sol::canBePacked(eltTy)) {
-      // Packed: load-modify-store to clear just those bytes.
       unsigned numBits = sol::getStorageByteSize(eltTy) * 8;
-      Value eltByteSize = bExt.genI256Const(sol::getStorageByteSize(eltTy));
-      Value bytePos = r.create<arith::MulIOp>(loc, newSize, eltByteSize);
-      Value thirtyTwo = bExt.genI256Const(32);
-      Value slotOffset = r.create<arith::DivUIOp>(loc, bytePos, thirtyTwo);
-      Value byteOffset = r.create<arith::RemUIOp>(loc, bytePos, thirtyTwo);
-      Value tailSlot = r.create<arith::AddIOp>(loc, dataSlot, slotOffset);
-
-      Value shiftBits =
-          r.create<arith::MulIOp>(loc, byteOffset, bExt.genI256Const(8));
-      Value cleared = evmB.genPunchHole(tailSlot, shiftBits, numBits);
+      auto [tailSlot, byteOffset] = evmB.genPackedStorageAddrPair(
+          dataSlot, newSize, sol::getStorageByteSize(eltTy));
+      Value slotVal = evmB.genLoad(tailSlot, sol::DataLocation::Storage, loc);
+      Value cleared = evmB.genInsertIntToSlot(
+          slotVal, byteOffset, bExt.genI256Const(0), numBits, loc);
       r.create<yul::SStoreOp>(loc, tailSlot, cleared);
     } else {
       // Slot-aligned: zero the whole slot.
@@ -1692,6 +1686,9 @@ struct PopOpLowering : public OpConversionPattern<sol::PopOp> {
       Value tailAddr = r.create<arith::AddIOp>(loc, dataSlot, scaledIdx);
       r.create<yul::SStoreOp>(loc, tailAddr, bExt.genI256Const(0));
     }
+
+    // Write the new length after clearing the element.
+    r.create<yul::SStoreOp>(loc, slot, newSize);
 
     r.eraseOp(op);
     return success();
