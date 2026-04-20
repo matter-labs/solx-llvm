@@ -132,16 +132,19 @@ struct ModifierOpLoweringPass
 
     FunctionType modifierFnTy = modifierFn.getFunctionType();
     assert(modifierFnTy == callee.getFunctionType());
-    assert(modifierFnTy.getNumResults() <= 1 && "NYI");
 
-    // Generate the alloca for the return arg.
-    sol::AllocaOp retAddr;
-    if (modifierFnTy.getNumResults() == 1) {
+    // Preserve callee results across the modifier body so every return path can
+    // forward the final placeholder invocation result.
+    SmallVector<sol::AllocaOp, 4> retAddrs;
+    if (modifierFnTy.getNumResults() != 0) {
+      retAddrs.reserve(modifierFnTy.getNumResults());
       b.setInsertionPointToStart(&modifierFn.getBlocks().front());
-      retAddr = b.create<sol::AllocaOp>(
-          modifierFn.getLoc(),
-          sol::PointerType::get(b.getContext(), modifierFnTy.getResult(0),
-                                sol::DataLocation::Stack));
+      for (Type resultTy : modifierFnTy.getResults()) {
+        retAddrs.push_back(b.create<sol::AllocaOp>(
+            modifierFn.getLoc(),
+            sol::PointerType::get(b.getContext(), resultTy,
+                                  sol::DataLocation::Stack)));
+      }
     }
 
     // Replace sol.placeholders with a call to the callee.
@@ -149,18 +152,21 @@ struct ModifierOpLoweringPass
       b.setInsertionPoint(placeholder);
       auto call = b.create<sol::CallOp>(placeholder.getLoc(), callee,
                                         modifierFn.getArguments());
-      if (modifierFnTy.getNumResults() == 1)
-        b.create<sol::StoreOp>(placeholder.getLoc(), call.getResult(0),
-                               retAddr);
+      for (auto [result, retAddr] : llvm::zip(call.getResults(), retAddrs))
+        b.create<sol::StoreOp>(placeholder.getLoc(), result, retAddr);
       placeholder.erase();
     });
 
-    // Add the return arg in the sol.returns.
-    if (modifierFnTy.getNumResults() == 1) {
+    // Add the return args in the sol.returns.
+    if (!retAddrs.empty()) {
       modifierFn.walk([&](sol::ReturnOp ret) {
         b.setInsertionPoint(ret);
-        auto retVal = b.create<sol::LoadOp>(ret.getLoc(), retAddr);
-        b.create<sol::ReturnOp>(ret.getLoc(), retVal.getResult());
+        SmallVector<Value, 4> retVals;
+        retVals.reserve(retAddrs.size());
+        for (sol::AllocaOp retAddr : retAddrs)
+          retVals.push_back(
+              b.create<sol::LoadOp>(ret.getLoc(), retAddr).getResult());
+        b.create<sol::ReturnOp>(ret.getLoc(), retVals);
         ret.erase();
       });
     }
