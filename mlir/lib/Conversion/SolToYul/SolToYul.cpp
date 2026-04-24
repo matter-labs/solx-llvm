@@ -14,6 +14,7 @@
 #include "mlir/Conversion/SolToYul/EVMConstants.h"
 #include "mlir/Conversion/SolToYul/EVMUtil.h"
 #include "mlir/Conversion/SolToYul/Util.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
@@ -3445,7 +3446,7 @@ struct RevertOpLowering : public OpConversionPattern<sol::RevertOp> {
       // revert()
       evmB.genRevert(op.getLoc());
     }
-    r.eraseOp(op);
+    r.replaceOpWithNewOp<LLVM::UnreachableOp>(op);
     return success();
   }
 };

@@ -490,7 +490,7 @@ def Sol_EmitOp : Sol_Op<"emit"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-def Sol_RevertOp : Sol_Op<"revert"> {
+def Sol_RevertOp : Sol_Op<"revert", [Terminator]> {
   // $signature represents the error call's signature if $call is set.
   let arguments = (ins Variadic<AnyType>:$args, StrAttr:$signature,
                        UnitAttr:$call);
