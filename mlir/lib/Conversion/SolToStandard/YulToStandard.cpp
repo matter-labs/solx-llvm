@@ -13,11 +13,14 @@
 #include "mlir/Conversion/SolToStandard/YulToStandard.h"
 #include "mlir/Conversion/SolToStandard/EVMUtil.h"
 #include "mlir/Conversion/SolToStandard/Util.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
 #include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/IntrinsicsEVM.h"
 
@@ -31,6 +34,145 @@ static ModuleOp getModule(OpT op) {
   assert(mod && "expected attached module");
   return mod;
 }
+
+// For some dialects, we have to pass i1 instead of i256 for boolean values,
+// so this helper generates Yul like cast to i1 for such cases.
+Value genI1Cast(PatternRewriter &r, Location loc, Value val) {
+  assert(val.getType().isInteger(256) && "expected i256 type");
+  auto zero =
+      r.create<arith::ConstantOp>(loc, r.getIntegerAttr(val.getType(), 0));
+  return r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, val, zero);
+}
+
+// Some dialects returns i1 for boolean values, but Yul expects i256,
+// so this helper generates zext cast to i256 for such cases.
+Value genI256Cast(PatternRewriter &r, Location loc, Value val) {
+  assert(val.getType().isInteger(1) && "expected i1 type");
+  return r.create<arith::ExtUIOp>(loc, r.getIntegerType(256), val);
+}
+
+struct ConstantOpLowering : public OpRewritePattern<yul::ConstantOp> {
+  using OpRewritePattern<yul::ConstantOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::ConstantOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<arith::ConstantOp>(op, op.getValueAttr());
+    return success();
+  }
+};
+
+template <typename YulOp, typename ArithOp>
+struct BinaryOpLowering : public OpRewritePattern<YulOp> {
+  using OpRewritePattern<YulOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(YulOp op, PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<ArithOp>(op, op.getLhs(), op.getRhs());
+    return success();
+  }
+};
+
+struct NotOpLowering : public OpRewritePattern<yul::NotOp> {
+  using OpRewritePattern<yul::NotOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::NotOp op,
+                                PatternRewriter &r) const override {
+    APInt allOnes =
+        APInt::getAllOnes(op.getValue().getType().getIntOrFloatBitWidth());
+    Value mask = r.create<arith::ConstantOp>(
+        op.getLoc(), r.getIntegerAttr(op.getValue().getType(), allOnes));
+    r.replaceOpWithNewOp<arith::XOrIOp>(op, op.getValue(), mask);
+    return success();
+  }
+};
+
+struct CmpOpLowering : public OpRewritePattern<yul::CmpOp> {
+  using OpRewritePattern<yul::CmpOp>::OpRewritePattern;
+
+  arith::CmpIPredicate getCmpPredicate(yul::CmpPredicate pred) const {
+#define MAP_CMP_PREDICATE(value)                                               \
+  case yul::CmpPredicate::value:                                               \
+    return arith::CmpIPredicate::value
+
+    switch (pred) {
+      MAP_CMP_PREDICATE(eq);
+      MAP_CMP_PREDICATE(ne);
+      MAP_CMP_PREDICATE(ult);
+      MAP_CMP_PREDICATE(ule);
+      MAP_CMP_PREDICATE(ugt);
+      MAP_CMP_PREDICATE(uge);
+      MAP_CMP_PREDICATE(slt);
+      MAP_CMP_PREDICATE(sle);
+      MAP_CMP_PREDICATE(sgt);
+      MAP_CMP_PREDICATE(sge);
+    }
+#undef MAP_CMP_PREDICATE
+
+    llvm_unreachable("Invalid Yul comparison predicate");
+  }
+
+  LogicalResult matchAndRewrite(yul::CmpOp op,
+                                PatternRewriter &r) const override {
+    arith::CmpIPredicate predicate = getCmpPredicate(op.getPredicate());
+    Value cmp = r.create<arith::CmpIOp>(op.getLoc(), predicate, op.getLhs(),
+                                        op.getRhs());
+    r.replaceOp(op, genI256Cast(r, op.getLoc(), cmp));
+    return success();
+  }
+};
+
+struct FuncCallOpLowering : public OpRewritePattern<yul::FuncCallOp> {
+  using OpRewritePattern<yul::FuncCallOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::FuncCallOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<func::CallOp>(op, op.getCallee(), op.getResultTypes(),
+                                       op.getOperands());
+    return success();
+  }
+};
+
+struct FuncReturnOpLowering : public OpRewritePattern<yul::FuncReturnOp> {
+  using OpRewritePattern<yul::FuncReturnOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::FuncReturnOp op,
+                                PatternRewriter &r) const override {
+    r.replaceOpWithNewOp<func::ReturnOp>(op, op.getOperands());
+    return success();
+  }
+};
+
+struct FuncOpLowering : public OpRewritePattern<yul::FuncOp> {
+  using OpRewritePattern<yul::FuncOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::FuncOp op,
+                                PatternRewriter &r) const override {
+    // Set llvm.linkage attribute to private if not explicitly specified.
+    std::vector<NamedAttribute> attrs;
+    if (auto linkageAttr = op->getAttr("llvm.linkage"))
+      attrs.push_back(r.getNamedAttr("llvm.linkage", linkageAttr));
+    else
+      attrs.push_back(r.getNamedAttr(
+          "llvm.linkage",
+          LLVM::LinkageAttr::get(r.getContext(), LLVM::Linkage::Private)));
+
+    // Add the nofree and null_pointer_is_valid attributes of llvm via the
+    // passthrough attribute.
+    std::vector<Attribute> passthroughAttrs;
+    passthroughAttrs.push_back(r.getStringAttr("nofree"));
+    passthroughAttrs.push_back(r.getStringAttr("null_pointer_is_valid"));
+    attrs.push_back(r.getNamedAttr(
+        "passthrough", ArrayAttr::get(r.getContext(), passthroughAttrs)));
+
+    // TODO: Add additional attribute for -O0 and -Oz
+
+    // FIXME: The location of the block arguments are lost here!
+    auto newOp = r.create<func::FuncOp>(op.getLoc(), op.getName(),
+                                        op.getFunctionType(), attrs);
+    r.inlineRegionBefore(op.getBody(), newOp.getBody(), newOp.end());
+    r.eraseOp(op);
+    return success();
+  }
+};
 
 struct UpdFreePtrOpLowering : public OpRewritePattern<yul::UpdFreePtrOp> {
   using OpRewritePattern<yul::UpdFreePtrOp>::OpRewritePattern;
@@ -1055,6 +1197,226 @@ struct InvalidOpLowering : public OpRewritePattern<yul::InvalidOp> {
   }
 };
 
+struct IfOpLowering : public OpRewritePattern<yul::IfOp> {
+  using OpRewritePattern<yul::IfOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::IfOp ifOp,
+                                PatternRewriter &r) const override {
+    Location loc = ifOp.getLoc();
+
+    bool emptyElse = ifOp.getElseRegion().empty();
+    Block *currentBlock = r.getInsertionBlock();
+    Block *remainingOpsBlock =
+        r.splitBlock(currentBlock, r.getInsertionPoint());
+    Block *continueBlock;
+    if (ifOp->getResults().empty())
+      continueBlock = remainingOpsBlock;
+    else
+      llvm_unreachable("NYI");
+
+    // Inline then region.
+    Block *thenBeforeBody = &ifOp.getThenRegion().front();
+    Block *thenAfterBody = &ifOp.getThenRegion().back();
+    r.inlineRegionBefore(ifOp.getThenRegion(), continueBlock);
+
+    r.setInsertionPointToEnd(thenAfterBody);
+    if (auto thenYieldOp =
+            dyn_cast<yul::YieldOp>(thenAfterBody->getTerminator())) {
+      r.replaceOpWithNewOp<cf::BranchOp>(thenYieldOp, continueBlock,
+                                         thenYieldOp->getOperands());
+    }
+
+    r.setInsertionPointToEnd(continueBlock);
+
+    // Has else region: inline it.
+    Block *elseBeforeBody = nullptr;
+    Block *elseAfterBody = nullptr;
+    if (!emptyElse) {
+      elseBeforeBody = &ifOp.getElseRegion().front();
+      elseAfterBody = &ifOp.getElseRegion().back();
+      r.inlineRegionBefore(ifOp.getElseRegion(), thenAfterBody);
+    } else {
+      elseBeforeBody = elseAfterBody = continueBlock;
+    }
+
+    r.setInsertionPointToEnd(currentBlock);
+    r.create<cf::CondBranchOp>(loc, genI1Cast(r, loc, ifOp.getCond()),
+                               thenBeforeBody, elseBeforeBody);
+
+    if (!emptyElse) {
+      r.setInsertionPointToEnd(elseAfterBody);
+      if (auto elseYieldOp =
+              dyn_cast<yul::YieldOp>(elseAfterBody->getTerminator())) {
+        r.replaceOpWithNewOp<cf::BranchOp>(elseYieldOp, continueBlock,
+                                           elseYieldOp->getOperands());
+      }
+    }
+
+    r.replaceOp(ifOp, continueBlock->getArguments());
+    return success();
+  }
+};
+
+struct SwitchOpLowering : public OpRewritePattern<yul::SwitchOp> {
+  using OpRewritePattern<yul::SwitchOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(yul::SwitchOp switchOp,
+                                PatternRewriter &r) const override {
+    // Split the block at the op.
+    Block *condBlk = r.getInsertionBlock();
+    Block *continueBlk = r.splitBlock(condBlk, Block::iterator(switchOp));
+
+    auto convertRegion = [&](Region &region) -> Block * {
+      for (Block &blk : region) {
+        auto yield = dyn_cast<yul::YieldOp>(blk.getTerminator());
+        if (!yield)
+          continue;
+        // Convert the yield terminator to a branch to the continue block.
+        r.setInsertionPoint(yield);
+        r.replaceOpWithNewOp<cf::BranchOp>(yield, continueBlk,
+                                           yield->getOperands());
+      }
+
+      // Inline the region.
+      Block *entryBlk = &region.front();
+      r.inlineRegionBefore(region, continueBlk);
+      return entryBlk;
+    };
+
+    // Convert the case regions.
+    SmallVector<Block *> caseSuccessors;
+    SmallVector<llvm::APInt> caseVals;
+    caseSuccessors.reserve(switchOp.getCases().size());
+    caseVals.reserve(switchOp.getCases().size());
+    for (auto [region, val] :
+         llvm::zip(switchOp.getCaseRegions(), switchOp.getCases())) {
+      caseSuccessors.push_back(convertRegion(region));
+      caseVals.push_back(val);
+    }
+
+    // Convert the default region.
+    Block *defaultBlk = convertRegion(switchOp.getDefaultRegion());
+
+    r.setInsertionPointToEnd(condBlk);
+    if (!caseVals.empty()) {
+      SmallVector<ValueRange> caseOperands(caseSuccessors.size(), {});
+
+      // Create the attribute for the case values.
+      auto caseValsAttr = DenseIntElementsAttr::get(
+          VectorType::get(static_cast<int64_t>(caseVals.size()),
+                          switchOp.getArg().getType()),
+          caseVals);
+      r.create<cf::SwitchOp>(switchOp.getLoc(), switchOp.getArg(), defaultBlk,
+                             ValueRange(), caseValsAttr, caseSuccessors,
+                             caseOperands);
+    } else {
+      r.create<cf::BranchOp>(switchOp.getLoc(), defaultBlk);
+    }
+
+    r.replaceOp(switchOp, continueBlk->getArguments());
+    return success();
+  }
+};
+
+struct LoopOpInterfaceLowering
+    : public OpInterfaceRewritePattern<yul::LoopOpInterface> {
+  using OpInterfaceRewritePattern<
+      yul::LoopOpInterface>::OpInterfaceRewritePattern;
+
+  /// Walks a region while skipping operations of type `Ops`. This ensures the
+  /// callback is not applied to said operations and its children.
+  template <typename... Ops>
+  void
+  walkRegionSkipping(Region &region,
+                     function_ref<WalkResult(Operation *)> callback) const {
+    region.walk<WalkOrder::PreOrder>([&](Operation *op) {
+      if (isa<Ops...>(op))
+        return WalkResult::skip();
+      return callback(op);
+    });
+  }
+
+  /// Lowers operations with the terminator trait that have a single successor.
+  void lowerTerminator(Operation *op, Block *dest, PatternRewriter &r) const {
+    assert(op->hasTrait<OpTrait::IsTerminator>() && "not a terminator");
+    OpBuilder::InsertionGuard guard(r);
+    r.setInsertionPoint(op);
+    r.replaceOpWithNewOp<cf::BranchOp>(op, dest);
+  }
+
+  void lowerConditionOp(yul::ConditionOp op, Block *body, Block *exit,
+                        PatternRewriter &r) const {
+    OpBuilder::InsertionGuard guard(r);
+    Location loc = op.getLoc();
+    r.setInsertionPoint(op);
+    r.replaceOpWithNewOp<cf::CondBranchOp>(
+        op, genI1Cast(r, loc, op.getCondition()), body, exit);
+  }
+
+  LogicalResult matchAndRewrite(yul::LoopOpInterface op,
+                                PatternRewriter &r) const override {
+    // Setup CFG blocks.
+    Block *entry = r.getInsertionBlock();
+    Block *exit = r.splitBlock(entry, r.getInsertionPoint());
+    Block *cond = &op.getCond().front();
+    Block *body = &op.getBody().front();
+    Block *step = (op.maybeGetStep() ? &op.maybeGetStep()->front() : nullptr);
+
+    // Setup loop entry branch.
+    r.setInsertionPointToEnd(entry);
+    r.create<cf::BranchOp>(op.getLoc(), &op.getEntry().front());
+
+    // Branch from condition region to body or exit.
+    auto conditionOp = cast<yul::ConditionOp>(cond->getTerminator());
+    lowerConditionOp(conditionOp, body, exit, r);
+
+    // TODO: Remove the walks below. It visits operations unnecessarily,
+    // however, to solve this we would likely need a custom DialectConversion
+    // driver to customize the order that operations are visited.
+
+    // Lower continue statements.
+    Block *dest = (step ? step : cond);
+    op.walkBodySkippingNestedLoops([&](Operation *op) {
+      if (!isa<yul::ContinueOp>(op))
+        return WalkResult::advance();
+
+      lowerTerminator(op, dest, r);
+      return WalkResult::skip();
+    });
+
+    // Lower break statements.
+    // FIXME: Skip yul.switch once we implement it.
+    walkRegionSkipping<yul::LoopOpInterface /* TODO:, yul::SwitchOp */>(
+        op.getBody(), [&](Operation *op) {
+          if (!isa<yul::BreakOp>(op))
+            return WalkResult::advance();
+
+          lowerTerminator(op, exit, r);
+          return mlir::WalkResult::skip();
+        });
+
+    // Lower optional body region yield.
+    for (Block &blk : op.getBody().getBlocks()) {
+      auto bodyYield = dyn_cast<yul::YieldOp>(blk.getTerminator());
+      if (bodyYield)
+        lowerTerminator(bodyYield, (step ? step : cond), r);
+    }
+
+    // Lower mandatory step region yield.
+    if (step)
+      lowerTerminator(cast<yul::YieldOp>(step->getTerminator()), cond, r);
+
+    // Move region contents out of the loop op.
+    r.inlineRegionBefore(op.getCond(), exit);
+    r.inlineRegionBefore(op.getBody(), exit);
+    if (step)
+      r.inlineRegionBefore(*op.maybeGetStep(), exit);
+
+    r.eraseOp(op);
+    return success();
+  }
+};
+
 struct ICallOpLowering : public OpConversionPattern<sol::ICallOp> {
   // This lowering cannot be done in the SolToYul pass because the function
   // signature matching requires all function signatures to be legalized (i.e.
@@ -1113,7 +1475,7 @@ struct ICallOpLowering : public OpConversionPattern<sol::ICallOp> {
 struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
   using OpRewritePattern<yul::ObjectOp>::OpRewritePattern;
 
-  // "Moves" the sol.object to the module.
+  // "Moves" the yul.object to the module.
   void moveObjToMod(yul::ObjectOp obj, ModuleOp mod, PatternRewriter &r) const {
     Location loc = obj.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
@@ -1133,8 +1495,8 @@ struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
     for (Region &region : obj->getRegions())
       for (Block &block : region)
         for (Operation &nestedOp : llvm::make_early_inc_range(block))
-          if (isa<sol::FuncOp>(nestedOp) || isa<yul::ObjectOp>(nestedOp) ||
-              isa<LLVM::GlobalOp>(nestedOp))
+          if (isa<sol::FuncOp>(nestedOp) || isa<yul::FuncOp>(nestedOp) ||
+              isa<yul::ObjectOp>(nestedOp) || isa<LLVM::GlobalOp>(nestedOp))
             nestedOp.moveBefore(modBlk, modBlk->end());
 
     // Terminate all blocks without terminators using the unreachable op.
@@ -1181,8 +1543,23 @@ struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
 } // namespace
 
 void evm::populateYulPats(RewritePatternSet &pats) {
+  pats.add<BinaryOpLowering<yul::AddOp, arith::AddIOp>,
+           BinaryOpLowering<yul::SubOp, arith::SubIOp>,
+           BinaryOpLowering<yul::MulOp, arith::MulIOp>,
+           BinaryOpLowering<yul::AndOp, arith::AndIOp>,
+           BinaryOpLowering<yul::OrOp, arith::OrIOp>,
+           BinaryOpLowering<yul::XOrOp, arith::XOrIOp>>(pats.getContext());
   pats.add<
       // clang-format off
+      ConstantOpLowering,
+      NotOpLowering,
+      CmpOpLowering,
+      FuncCallOpLowering,
+      FuncReturnOpLowering,
+      FuncOpLowering,
+      IfOpLowering,
+      SwitchOpLowering,
+      LoopOpInterfaceLowering,
       AddModOpLowering,
       MulModOpLowering,
       UpdFreePtrOpLowering,

@@ -7,6 +7,8 @@ add_mlir_dialect_library(MLIRYulDialect
 
   DEPENDS
   MLIRYulOpsIncGen
+  MLIRYulExtraIncGen
+  MLIRYulInterfacesIncGen
 
   LINK_LIBS PUBLIC
   )

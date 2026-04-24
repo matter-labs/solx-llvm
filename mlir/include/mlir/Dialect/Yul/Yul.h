@@ -19,11 +19,17 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Types.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/CastInterfaces.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "mlir/Dialect/Yul/YulInterfaces.h.inc"
 #include "mlir/Dialect/Yul/YulOpsDialect.h.inc"
+#include "mlir/Dialect/Yul/YulOpsEnums.h.inc"
 
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Yul/YulOps.h.inc"

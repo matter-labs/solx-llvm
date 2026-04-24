@@ -10,8 +10,206 @@
 #define MLIR_DIALECT_YUL_YULOPS_TD
 
 include "YulBase.td"
+include "YulInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/SymbolInterfaces.td"
+include "mlir/Interfaces/CallInterfaces.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/FunctionInterfaces.td"
+
+def Yul_FuncOp : Yul_Op<"func", [AutomaticAllocationScope,
+                                  CallableOpInterface,
+                                  FunctionOpInterface,
+                                  IsolatedFromAbove, Symbol]> {
+  let summary = "Represents a Yul function";
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       TypeAttrOf<FunctionType>:$function_type,
+                       OptionalAttr<DictArrayAttr>:$arg_attrs,
+                       OptionalAttr<DictArrayAttr>:$res_attrs);
+  let regions = (region AnyRegion:$body);
+
+  let builders = [
+    OpBuilder<(ins "StringRef":$name, "FunctionType":$type), [{
+      $_state.addRegion();
+      $_state.addAttribute(getSymNameAttrName($_state.name),
+                           $_builder.getStringAttr(name));
+      $_state.addAttribute(getFunctionTypeAttrName($_state.name),
+                           TypeAttr::get(type));
+    }]>
+  ];
+  let skipDefaultBuilders = 1;
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    //===------------------------------------------------------------------===//
+    // CallableOpInterface
+    //===------------------------------------------------------------------===//
+    ::mlir::Region *getCallableRegion() {
+      return isExternal() ? nullptr : &getBody();
+    }
+
+    //===------------------------------------------------------------------===//
+    // FunctionOpInterface
+    //===------------------------------------------------------------------===//
+    ::llvm::ArrayRef<::mlir::Type> getArgumentTypes() {
+      return getFunctionType().getInputs();
+    }
+    ::llvm::ArrayRef<::mlir::Type> getResultTypes() {
+      return getFunctionType().getResults();
+    }
+  }];
+
+  let assemblyFormat = "$sym_name `:` $function_type $body attr-dict";
+}
+
+def Yul_FuncCallOp : Yul_Op<"func_call"> {
+  let summary = "Represents a Yul function call";
+  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<I256>:$operands);
+  let results = (outs Variadic<I256>:$outs);
+
+  let builders = [
+    OpBuilder<(ins "FuncOp":$callee, CArg<"ValueRange", "{}">:$operands), [{
+      $_state.addOperands(operands);
+      $_state.addAttribute(getCalleeAttrName($_state.name),
+                           SymbolRefAttr::get(callee));
+      $_state.addTypes(callee.getFunctionType().getResults());
+    }]>
+  ];
+
+  let assemblyFormat = [{
+    $callee `(` $operands `)` attr-dict `:` functional-type($operands, results)
+  }];
+}
+
+def Yul_FuncReturnOp : Yul_Op<"func_return", [Pure, Terminator]> {
+  let summary = "Represents a Yul function return";
+  let arguments = (ins Variadic<I256>:$operands);
+
+  let builders = [
+    OpBuilder<(ins), [{
+      build($_builder, $_state, {});
+    }]>,
+  ];
+
+  let assemblyFormat = "attr-dict ($operands^ `:` type($operands))?";
+}
+
+def Yul_ConstantOp : Yul_Op<"constant", [
+  Pure,
+  DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+]> {
+  let summary = "Represents a Yul word constant";
+  let arguments = (ins I256Attr:$value);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$value attr-dict";
+}
+
+class Yul_BinOp<string mnemonic> : Yul_Op<mnemonic, [Pure]> {
+  let arguments = (ins I256:$lhs, I256:$rhs);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
+}
+
+def Yul_AddOp : Yul_BinOp<"add"> {
+  let summary = "Represents the `add` call in yul";
+}
+
+def Yul_SubOp : Yul_BinOp<"sub"> {
+  let summary = "Represents the `sub` call in yul";
+}
+
+def Yul_MulOp : Yul_BinOp<"mul"> {
+  let summary = "Represents the `mul` call in yul";
+}
+
+def Yul_AndOp : Yul_BinOp<"and"> {
+  let summary = "Represents the `and` call in yul";
+}
+
+def Yul_OrOp : Yul_BinOp<"or"> {
+  let summary = "Represents the `or` call in yul";
+}
+
+def Yul_XOrOp : Yul_BinOp<"xor"> {
+  let summary = "Represents the `xor` call in yul";
+}
+
+def Yul_NotOp : Yul_Op<"not", [Pure]> {
+  let summary = "Represents the `not` call in yul";
+  let arguments = (ins I256:$value);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$value attr-dict";
+}
+
+def Yul_CmpOp : Yul_Op<"cmp", [Pure]> {
+  let summary = "Represents a Yul word comparison";
+  let arguments = (ins Yul_CmpPredicateAttr:$predicate, I256:$lhs, I256:$rhs);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict";
+}
+
+def Yul_BreakOp : Yul_Op<"break", [Terminator]> {
+  let assemblyFormat = "attr-dict";
+}
+
+def Yul_ContinueOp : Yul_Op<"continue", [Terminator]> {
+  let assemblyFormat = "attr-dict";
+}
+
+def Yul_ConditionOp : Yul_Op<"condition", [Terminator]> {
+  let arguments = (ins I256:$condition);
+  let assemblyFormat = "$condition attr-dict";
+}
+
+def Yul_YieldOp : Yul_Op<"yield", [ReturnLike, Terminator,
+  ParentOneOf<["IfOp", "SwitchOp", "ForOp"]>]
+> {
+  let builders = [
+    OpBuilder<(ins), [{ /* nothing to do */ }]>,
+  ];
+
+  let assemblyFormat = "attr-dict";
+}
+
+def Yul_IfOp : Yul_Op<"if",
+  [AutomaticAllocationScope, NoRegionArguments,
+   DeclareOpInterfaceMethods<RegionBranchOpInterface>]
+> {
+  let arguments = (ins I256:$cond);
+  let regions = (region MinSizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
+
+  let assemblyFormat = "$cond $thenRegion `else` $elseRegion attr-dict";
+}
+
+def Yul_SwitchOp : Yul_Op<"switch", [
+  AutomaticAllocationScope, NoRegionArguments,
+  DeclareOpInterfaceMethods<RegionBranchOpInterface,
+                            ["getRegionInvocationBounds"]>
+]> {
+  let arguments = (ins I256:$arg, AnyIntElementsAttr:$cases);
+  let regions = (region MinSizedRegion<1>:$defaultRegion,
+                        VariadicRegion<MinSizedRegion<1>>:$caseRegions);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def Yul_ForOp : Yul_Op<"for", [Yul_LoopOpInterface, NoRegionArguments,
+                               AutomaticAllocationScope]> {
+  let regions = (region SizedRegion<1>:$cond, MinSizedRegion<1>:$body,
+                        SizedRegion<1>:$step);
+
+  let assemblyFormat = [{
+    `cond` $cond
+    `body` $body
+    `step` $step
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    mlir::Region *maybeGetStep() { return &getStep(); }
+  }];
+}
 
 def Yul_UpdFreePtrOp : Yul_Op<"upd_free_ptr"> {
   let arguments = (ins I256:$size);

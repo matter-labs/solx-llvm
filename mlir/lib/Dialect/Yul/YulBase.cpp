@@ -13,7 +13,9 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Yul/Yul.h"
 
+#include "mlir/Dialect/Yul/YulInterfaces.cpp.inc"
 #include "mlir/Dialect/Yul/YulOpsDialect.cpp.inc"
+#include "mlir/Dialect/Yul/YulOpsEnums.cpp.inc"
 
 using namespace mlir;
 using namespace mlir::yul;

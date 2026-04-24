@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_YUL_YULBASE_TD
 
 include "mlir/IR/OpBase.td"
+include "mlir/IR/EnumAttr.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
@@ -35,6 +36,21 @@ def I256 : I<256>;
 
 def I256Attr : SignlessIntegerAttrBase<I256,
                                        "256-bit signless integer attribute">;
+
+def Yul_CmpPredicateAttr :
+    I64EnumAttr<"CmpPredicate", "Yul comparison predicate",
+                [I64EnumAttrCase<"eq", 0>,
+                 I64EnumAttrCase<"ne", 1>,
+                 I64EnumAttrCase<"ult", 2>,
+                 I64EnumAttrCase<"ule", 3>,
+                 I64EnumAttrCase<"ugt", 4>,
+                 I64EnumAttrCase<"uge", 5>,
+                 I64EnumAttrCase<"slt", 6>,
+                 I64EnumAttrCase<"sle", 7>,
+                 I64EnumAttrCase<"sgt", 8>,
+                 I64EnumAttrCase<"sge", 9>]> {
+  let cppNamespace = "::mlir::yul";
+}
 
 //===----------------------------------------------------------------------===//
 // Op classes
