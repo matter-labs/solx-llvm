@@ -2265,6 +2265,19 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
         return dstAddr;
       }
 
+      // Non-reference value elements in calldata are laid out contiguously, one
+      // ABI word (32 bytes) per element, matching the memory layout exactly.
+      // Use calldatacopy to copy the entire payload in one operation.
+      // TODO: Support multi-dimensional arrays.
+      if (srcDataLoc == sol::DataLocation::CallData &&
+          !sol::isNonPtrRefType(eltTy)) {
+        Value sizeInBytes = r.create<arith::MulIOp>(
+            loc, size, bExt.genI256Const(evm::getCallDataHeadSize(eltTy)));
+        r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
+                                      sizeInBytes);
+        return dstAddr;
+      }
+
       r.create<scf::ForOp>(
           loc, /*lowerBound=*/bExt.genIdxConst(0),
           /*upperBound=*/bExt.genCastToIdx(size),
