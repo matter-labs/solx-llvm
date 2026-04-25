@@ -1950,30 +1950,45 @@ struct MapOpLowering : public OpConversionPattern<sol::MapOp> {
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
 
     // Assert that the mapping is a slot (result of sol.addr_of or sol.map).
     assert(cast<IntegerType>(adaptor.getMapping().getType()).getWidth() == 256);
 
-    // Setup arguments to keccak256.
-    auto zero = bExt.genI256Const(0);
-    bool keySigned = false;
-    if (auto keyTy = dyn_cast<IntegerType>(op.getKey().getType()))
-      keySigned = keyTy.isSigned();
-    else
-      assert(sol::isAddressLikeType(op.getKey().getType()) &&
-             "NYI: Unsupported mapping key type");
-    auto key = bExt.genIntCast(/*width=*/256, keySigned, adaptor.getKey());
-    r.create<yul::MStoreOp>(loc, zero, key);
-    r.create<yul::MStoreOp>(loc, bExt.genI256Const(0x20), adaptor.getMapping());
+    Type keyTy = op.getKey().getType();
+    Value slot;
 
-    Value slot = r.create<yul::Keccak256Op>(loc, zero, bExt.genI256Const(0x40));
+    if (isa<sol::StringType>(keyTy)) {
+      // Dynamic key types (string, bytes): hash = keccak256(abi.encodePacked(
+      // rawBytes, slot))
+      Value pos = evmB.genFreePtr(loc);
+      Value dataLen =
+          evmB.genCopyStringDataToMemory(adaptor.getKey(), keyTy, pos, loc);
+      Value slotAddr = r.create<arith::AddIOp>(loc, pos, dataLen);
+      r.create<yul::MStoreOp>(loc, slotAddr, adaptor.getMapping());
+      Value totalLen =
+          r.create<arith::AddIOp>(loc, dataLen, bExt.genI256Const(0x20));
+      slot = r.create<yul::Keccak256Op>(loc, pos, totalLen);
+    } else {
+      // Static key types (integers, address, contract, enum, fixedbytes, byte,
+      // ext func ref): value-type key left/right-aligned in 32 bytes, followed
+      // by slot. hash = keccak256(key_word, slot_word).
+      auto zero = bExt.genI256Const(0);
+      auto intTy = dyn_cast<IntegerType>(keyTy);
+      auto key = bExt.genIntCast(/*width=*/256, intTy && intTy.isSigned(),
+                                 adaptor.getKey());
+      r.create<yul::MStoreOp>(loc, zero, key);
+      r.create<yul::MStoreOp>(loc, bExt.genI256Const(0x20),
+                              adaptor.getMapping());
+      slot = r.create<yul::Keccak256Op>(loc, zero, bExt.genI256Const(0x40));
+    }
 
     // Result is {slot, 0} or just slot depending on pointee type.
     Type resTy = op.getResult().getType();
     if (auto ptrTy = dyn_cast<sol::PointerType>(resTy);
         ptrTy && ptrTy.getDataLocation() == sol::DataLocation::Storage &&
         sol::canBePacked(ptrTy.getPointeeType())) {
-      r.replaceOp(op, bExt.genLLVMStruct({slot, zero}));
+      r.replaceOp(op, bExt.genLLVMStruct({slot, bExt.genI256Const(0)}));
     } else {
       r.replaceOp(op, slot);
     }
