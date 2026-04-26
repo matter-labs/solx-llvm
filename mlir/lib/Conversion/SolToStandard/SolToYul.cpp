@@ -2019,6 +2019,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
                                          evm::getAlignment(addr));
       return success();
     }
+    case sol::DataLocation::Immutable:
     case sol::DataLocation::CallData:
     case sol::DataLocation::Memory: {
       auto ld = evmB.genLoad(addr, dataLoc);
