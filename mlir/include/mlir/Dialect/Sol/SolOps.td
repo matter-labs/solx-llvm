@@ -311,7 +311,7 @@ def Sol_AddrOfOp : Sol_Op<"addr_of", [Pure]> {
 
 def Sol_GepOp : Sol_Op<"gep"> {
   let arguments = (ins AnyType:$baseAddr, Sol_Int:$idx);
-  let results = (outs Sol_RefType:$addr);
+  let results = (outs AnyTypeOf<[Sol_RefType, Sol_MappingType]>:$addr);
 
   let builders = [
     OpBuilder<(ins "Value":$baseAddr, "Value":$idx)>
