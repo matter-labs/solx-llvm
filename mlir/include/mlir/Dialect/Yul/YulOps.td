@@ -64,8 +64,11 @@ def Yul_FuncOp : Yul_Op<"func", [AutomaticAllocationScope,
 
 def Yul_FuncCallOp : Yul_Op<"func_call"> {
   let summary = "Represents a Yul function call";
-  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<I256>:$operands);
-  let results = (outs Variadic<I256>:$outs);
+  // TODO #i256promote: Revert back to Variadic<I256> once Solidity boundary
+  // types are promoted before Sol-to-Yul.
+  let arguments = (ins FlatSymbolRefAttr:$callee,
+                       Variadic<AnyType>:$operands);
+  let results = (outs Variadic<AnyType>:$outs);
 
   let builders = [
     OpBuilder<(ins "FuncOp":$callee, CArg<"ValueRange", "{}">:$operands), [{
@@ -83,7 +86,8 @@ def Yul_FuncCallOp : Yul_Op<"func_call"> {
 
 def Yul_FuncReturnOp : Yul_Op<"func_return", [Pure, Terminator]> {
   let summary = "Represents a Yul function return";
-  let arguments = (ins Variadic<I256>:$operands);
+  // TODO #i256promote: Revert back to Variadic<I256> with Yul_FuncCallOp.
+  let arguments = (ins Variadic<AnyType>:$operands);
 
   let builders = [
     OpBuilder<(ins), [{

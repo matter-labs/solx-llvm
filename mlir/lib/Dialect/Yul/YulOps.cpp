@@ -30,16 +30,18 @@ void ConstantOp::getAsmResultNames(
 }
 
 LogicalResult FuncOp::verify() {
-  auto i256Ty = IntegerType::get(getContext(), 256);
   auto fnTy = getFunctionType();
 
-  for (Type inputTy : fnTy.getInputs())
-    if (inputTy != i256Ty)
-      return emitOpError("expects all input types to be i256");
-
-  for (Type resultTy : fnTy.getResults())
-    if (resultTy != i256Ty)
-      return emitOpError("expects all result types to be i256");
+  // TODO #i256promote: Revert back to i256-only Yul function
+  // inputs/results once Solidity boundary types are promoted before Sol-to-Yul.
+  //
+  // auto i256Ty = IntegerType::get(getContext(), 256);
+  // for (Type inputTy : fnTy.getInputs())
+  //   if (inputTy != i256Ty)
+  //     return emitOpError("expects all input types to be i256");
+  // for (Type resultTy : fnTy.getResults())
+  //   if (resultTy != i256Ty)
+  //     return emitOpError("expects all result types to be i256");
 
   if (!getBody().empty()) {
     Block &entryBlock = getBody().front();
@@ -47,9 +49,20 @@ LogicalResult FuncOp::verify() {
       return emitOpError("expects entry block argument count to match the "
                          "function type input count");
 
-    for (BlockArgument arg : entryBlock.getArguments())
-      if (arg.getType() != i256Ty)
-        return emitOpError("expects all entry block argument types to be i256");
+    // TODO #i256promote: Revert back to this entry block check with the
+    // function type checks above.
+    //
+    // clang-format off
+    // for (BlockArgument arg : entryBlock.getArguments())
+    //   if (arg.getType() != i256Ty)
+    //     return emitOpError("expects all entry block argument types to be i256");
+    // clang-format on
+
+    for (auto [arg, inputTy] :
+         llvm::zip(entryBlock.getArguments(), fnTy.getInputs()))
+      if (arg.getType() != inputTy)
+        return emitOpError("expects entry block argument types to match the "
+                           "function type inputs");
 
     for (Block &block : getBody())
       for (FuncReturnOp returnOp : block.getOps<FuncReturnOp>())

@@ -58,15 +58,22 @@ void populateExtCallPat(RewritePatternSet &pats, TypeConverter &tyConv);
 /// Adds the conversion patterns of control flow ops in the sol dialect.
 void populateControlFlowPats(RewritePatternSet &pats);
 
-/// Adds the conversion patterns of func and related ops in the sol dialect.
-void populateFuncPats(RewritePatternSet &pats, TypeConverter &tyConv);
+/// Adds the conversion patterns of sol.call and sol.return.
+void populateFuncBoundaryPats(RewritePatternSet &pats, TypeConverter &tyConv);
+
+/// Adds the conversion pattern of sol.func.
+void populateFuncOpPats(RewritePatternSet &pats, TypeConverter &tyConv);
+
+/// Adds late Sol-to-Yul patterns that require legalized signatures and
+/// contract runtime/creation placement.
+void populateLateSolToYulPats(RewritePatternSet &pats, TypeConverter &tyConv);
 
 /// Adds the conversion pattern of sol.contract.
 void populateContractPat(RewritePatternSet &pats);
 
 void populateStage1Pats(RewritePatternSet &pats, TypeConverter &tyConv);
 
-void populateStage2Pats(RewritePatternSet &pats);
+void populateStage2Pats(RewritePatternSet &pats, TypeConverter &tyConv);
 
 } // namespace evm
 } // namespace mlir

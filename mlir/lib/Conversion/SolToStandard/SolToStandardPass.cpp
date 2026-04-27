@@ -13,6 +13,7 @@
 #include "mlir/Conversion/SolToStandard/EVMUtil.h"
 #include "mlir/Conversion/SolToStandard/SolToStandard.h"
 #include "mlir/Conversion/SolToStandard/SolToYul.h"
+#include "mlir/Conversion/SolToStandard/YulToStandard.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -229,37 +230,71 @@ struct ConvertSolToStandardPass
     return success();
   }
 
-  /// Converts sol.contract and all yul dialect ops.
-  LogicalResult runStage2Conversion(ModuleOp mod) {
+  /// Converts sol.contract and late sol ops that still need Sol context to Yul.
+  LogicalResult runStage2Conversion(ModuleOp mod,
+                                    evm::SolTypeConverter &tyConv) {
     ConversionTarget convTgt(getContext());
     convTgt.addLegalOp<ModuleOp>();
-    convTgt.addLegalDialect<sol::SolDialect, func::FuncDialect, scf::SCFDialect,
-                            cf::ControlFlowDialect, arith::ArithDialect,
-                            LLVM::LLVMDialect>();
-    convTgt.addIllegalDialect<sol::SolDialect, yul::YulDialect>();
-    convTgt
-        .addLegalOp<sol::FuncOp, sol::CallOp, sol::ReturnOp, sol::ConvCastOp>();
+    convTgt.addLegalDialect<sol::SolDialect, yul::YulDialect, func::FuncDialect,
+                            scf::SCFDialect, cf::ControlFlowDialect,
+                            arith::ArithDialect, LLVM::LLVMDialect>();
+    convTgt.addIllegalOp<sol::ContractOp, sol::ICallOp, sol::LoadImmutableOp>();
 
     RewritePatternSet pats(&getContext());
-    evm::populateStage2Pats(pats);
+    evm::populateStage2Pats(pats, tyConv);
 
     if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
       return failure();
     return success();
   }
 
-  /// Converts sol.func and related ops.
+  /// Converts sol.func and related function boundary ops to Yul.
   LogicalResult runStage3Conversion(ModuleOp mod,
                                     evm::SolTypeConverter &tyConv) {
+    // Keep sol.func legal while lowering sol.call/sol.return so function bodies
+    // are already Yul-clean before FuncOpLowering moves them into yul.func.
+    {
+      ConversionTarget convTgt(getContext());
+      convTgt.addLegalOp<ModuleOp>();
+      convTgt.addLegalDialect<
+          sol::SolDialect, yul::YulDialect, func::FuncDialect, scf::SCFDialect,
+          cf::ControlFlowDialect, arith::ArithDialect, LLVM::LLVMDialect>();
+      convTgt.addIllegalOp<sol::CallOp, sol::ReturnOp>();
+
+      RewritePatternSet pats(&getContext());
+      evm::populateFuncBoundaryPats(pats, tyConv);
+
+      if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
+        return failure();
+    }
+
+    {
+      ConversionTarget convTgt(getContext());
+      convTgt.addLegalOp<ModuleOp>();
+      convTgt.addLegalDialect<yul::YulDialect, func::FuncDialect,
+                              scf::SCFDialect, cf::ControlFlowDialect,
+                              arith::ArithDialect, LLVM::LLVMDialect>();
+      convTgt.addIllegalDialect<sol::SolDialect>();
+
+      RewritePatternSet pats(&getContext());
+      evm::populateFuncOpPats(pats, tyConv);
+
+      if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult runYulToStandardConversion(ModuleOp mod) {
     ConversionTarget convTgt(getContext());
     convTgt.addLegalOp<ModuleOp>();
-    convTgt.addLegalDialect<sol::SolDialect, func::FuncDialect, scf::SCFDialect,
+    convTgt.addLegalDialect<func::FuncDialect, scf::SCFDialect,
                             cf::ControlFlowDialect, arith::ArithDialect,
                             LLVM::LLVMDialect>();
-    convTgt.addIllegalDialect<sol::SolDialect>();
+    convTgt.addIllegalDialect<yul::YulDialect>();
 
     RewritePatternSet pats(&getContext());
-    evm::populateFuncPats(pats, tyConv);
+    evm::populateYulPats(pats);
 
     if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
       return failure();
@@ -273,11 +308,15 @@ struct ConvertSolToStandardPass
       signalPassFailure();
       return;
     }
-    if (failed(runStage2Conversion(mod))) {
+    if (failed(runStage2Conversion(mod, tyConv))) {
       signalPassFailure();
       return;
     }
     if (failed(runStage3Conversion(mod, tyConv))) {
+      signalPassFailure();
+      return;
+    }
+    if (failed(runYulToStandardConversion(mod))) {
       signalPassFailure();
       return;
     }

@@ -174,21 +174,10 @@ public:
     return b.create<mlir::arith::DivUIOp>(loc, add, genI256Const(multiple));
   }
 
-  /// Returns an existing or a new (if not found) FuncOp in the ModuleOp `mod`.
-  sol::FuncOp getOrInsertFuncOp(StringRef name, FunctionType fnTy,
-                                LLVM::Linkage linkage, ModuleOp mod,
-                                std::vector<NamedAttribute> attrs = {});
-
   /// Creates a private constant LLVM global in address space 4 (code) holding
   /// the given string literal bytes, with a unique \c __data_in_code_* name.
   mlir::LLVM::GlobalOp getStringLiteralGlobalOp(llvm::StringRef literal,
                                                 mlir::ModuleOp mod);
-
-  /// Creates a call to a wrapper function of the LLVM::UnreachableOp. This is a
-  /// hack to create a non-terminator unreachable op
-  void
-  createCallToUnreachableWrapper(ModuleOp mod,
-                                 std::optional<Location> locArg = std::nullopt);
 
   /// Generates an LLVM literal struct from the given values.
   Value genLLVMStruct(ValueRange vals,

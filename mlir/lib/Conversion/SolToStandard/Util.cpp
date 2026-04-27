@@ -61,45 +61,6 @@ Value BuilderExt::genIntCastWithBoolCleanup(unsigned width, bool isSigned,
   return genIntCast(width, isSigned, val, locArg);
 }
 
-sol::FuncOp BuilderExt::getOrInsertFuncOp(StringRef name, FunctionType fnTy,
-                                          LLVM::Linkage linkage, ModuleOp mod,
-                                          std::vector<NamedAttribute> attrs) {
-  if (auto found = mod.lookupSymbol<sol::FuncOp>(name))
-    return found;
-
-  // Set insertion point to the ModuleOp's body.
-  auto *ctx = mod.getContext();
-  OpBuilder::InsertionGuard insertGuard(b);
-  b.setInsertionPointToStart(mod.getBody());
-
-  // Add the linkage attribute.
-  attrs.emplace_back(StringAttr::get(ctx, "llvm.linkage"),
-                     LLVM::LinkageAttr::get(ctx, linkage));
-
-  auto fn = b.create<sol::FuncOp>(mod.getLoc(), name, fnTy, attrs);
-  fn.setPrivate();
-  return fn;
-}
-
-void BuilderExt::createCallToUnreachableWrapper(
-    ModuleOp mod, std::optional<Location> locArg) {
-  auto fnTy = FunctionType::get(mod.getContext(), {}, {});
-  sol::FuncOp fn =
-      getOrInsertFuncOp(".unreachable", fnTy, LLVM::Linkage::Private, mod);
-  Location loc = locArg ? *locArg : defLoc;
-  b.create<sol::CallOp>(
-      loc, FlatSymbolRefAttr::get(mod.getContext(), ".unreachable"),
-      TypeRange{}, ValueRange{});
-
-  // Define the wrapper if we haven't already.
-  if (fn.getBody().empty()) {
-    Block *blk = b.createBlock(&fn.getBody());
-    OpBuilder::InsertionGuard insertGuard(b);
-    b.setInsertionPointToStart(blk);
-    b.create<LLVM::UnreachableOp>(loc);
-  }
-}
-
 Value BuilderExt::genLLVMStruct(ValueRange vals,
                                 std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;

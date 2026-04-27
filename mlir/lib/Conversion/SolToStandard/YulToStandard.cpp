@@ -17,7 +17,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/APInt.h"
@@ -33,6 +32,47 @@ static ModuleOp getModule(OpT op) {
   ModuleOp mod = op->template getParentOfType<ModuleOp>();
   assert(mod && "expected attached module");
   return mod;
+}
+
+// Returns an existing or a new (if not found) FuncOp in the ModuleOp `mod`.
+func::FuncOp getOrInsertFuncOp(PatternRewriter &r, ModuleOp mod, StringRef name,
+                               FunctionType fnTy, LLVM::Linkage linkage) {
+  if (auto found = mod.lookupSymbol<func::FuncOp>(name))
+    return found;
+
+  OpBuilder::InsertionGuard insertGuard(r);
+  r.setInsertionPointToStart(mod.getBody());
+
+  std::vector<NamedAttribute> attrs;
+  attrs.push_back(r.getNamedAttr(
+      "llvm.linkage", LLVM::LinkageAttr::get(r.getContext(), linkage)));
+
+  std::vector<Attribute> passthroughAttrs;
+  passthroughAttrs.push_back(r.getStringAttr("nofree"));
+  passthroughAttrs.push_back(r.getStringAttr("null_pointer_is_valid"));
+  attrs.push_back(r.getNamedAttr(
+      "passthrough", ArrayAttr::get(r.getContext(), passthroughAttrs)));
+
+  return r.create<func::FuncOp>(mod.getLoc(), name, fnTy, attrs);
+}
+
+// Creates a call to a wrapper function of the LLVM::UnreachableOp. This is a
+// hack to create a non-terminator unreachable op.
+void createCallToUnreachableWrapper(PatternRewriter &r, ModuleOp mod,
+                                    Location loc) {
+  auto fnTy = FunctionType::get(mod.getContext(), {}, {});
+  func::FuncOp fn =
+      getOrInsertFuncOp(r, mod, ".unreachable", fnTy, LLVM::Linkage::Private);
+  r.create<func::CallOp>(
+      loc, FlatSymbolRefAttr::get(mod.getContext(), ".unreachable"),
+      TypeRange{}, ValueRange{});
+
+  if (fn.getBody().empty()) {
+    Block *blk = r.createBlock(&fn.getBody());
+    OpBuilder::InsertionGuard insertGuard(r);
+    r.setInsertionPointToStart(blk);
+    r.create<LLVM::UnreachableOp>(loc);
+  }
 }
 
 // For some dialects, we have to pass i1 instead of i256 for boolean values,
@@ -924,38 +964,6 @@ struct LoadImmutable2OpLowering
   }
 };
 
-struct LoadImmutableOpLowering
-    : public OpConversionPattern<sol::LoadImmutableOp> {
-  using OpConversionPattern<sol::LoadImmutableOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(sol::LoadImmutableOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &r) const override {
-    Location loc = op.getLoc();
-    mlir::solgen::BuilderExt bExt(r, loc);
-
-    bool inRuntime = op->getParentOfType<sol::FuncOp>().getRuntime();
-    Value repl;
-    if (inRuntime) {
-      repl = r.create<yul::LoadImmutableOp>(loc, op.getName());
-    } else {
-      assert(op->hasAttr("addr"));
-      IntegerAttr addr = cast<IntegerAttr>(op->getAttr("addr"));
-      repl = r.create<yul::MLoadOp>(loc, bExt.genI256Const(addr.getValue()));
-    }
-
-    if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
-      // TODO: Check if we need to call genIntCastWithBoolCleanup here.
-      Value castedRepl =
-          bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), repl);
-      r.replaceOp(op, castedRepl);
-      return success();
-    }
-
-    r.replaceOp(op, repl);
-    return success();
-  }
-};
-
 struct LinkerSymbolOpLowering : public OpRewritePattern<yul::LinkerSymbolOp> {
   using OpRewritePattern<yul::LinkerSymbolOp>::OpRewritePattern;
 
@@ -1059,15 +1067,15 @@ struct RevertOpLowering : public OpRewritePattern<yul::RevertOp> {
   LogicalResult matchAndRewrite(yul::RevertOp op,
                                 PatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(getModule(op), r, loc);
-    mlir::solgen::BuilderExt bExt(r, loc);
+    auto mod = getModule(op);
+    evm::Builder evmB(mod, r, loc);
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_revert,
         /*resTy=*/Type{},
         /*ins=*/ValueRange{evmB.genHeapPtr(op.getAddr()), op.getSize()},
         "evm.revert");
-    bExt.createCallToUnreachableWrapper(op->getParentOfType<ModuleOp>());
+    createCallToUnreachableWrapper(r, mod, loc);
     return success();
   }
 };
@@ -1154,15 +1162,15 @@ struct BuiltinRetOpLowering : public OpRewritePattern<yul::ReturnOp> {
   LogicalResult matchAndRewrite(yul::ReturnOp op,
                                 PatternRewriter &r) const override {
     Location loc = op.getLoc();
-    evm::Builder evmB(getModule(op), r, loc);
-    mlir::solgen::BuilderExt bExt(r, loc);
+    auto mod = getModule(op);
+    evm::Builder evmB(mod, r, loc);
 
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(
         op, llvm::Intrinsic::evm_return,
         /*resTy=*/Type{},
         /*ins=*/ValueRange{evmB.genHeapPtr(op.getAddr()), op.getSize()},
         "evm.return");
-    bExt.createCallToUnreachableWrapper(op->getParentOfType<ModuleOp>());
+    createCallToUnreachableWrapper(r, mod, loc);
     return success();
   }
 };
@@ -1172,12 +1180,10 @@ struct StopOpLowering : public OpRewritePattern<yul::StopOp> {
 
   LogicalResult matchAndRewrite(yul::StopOp op,
                                 PatternRewriter &r) const override {
-    mlir::solgen::BuilderExt bExt(r, op.getLoc());
-
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(op, llvm::Intrinsic::evm_stop,
                                            /*resTy=*/Type{},
                                            /*ins=*/ValueRange{}, "evm.stop");
-    bExt.createCallToUnreachableWrapper(op->getParentOfType<ModuleOp>());
+    createCallToUnreachableWrapper(r, getModule(op), op.getLoc());
     return success();
   }
 };
@@ -1187,12 +1193,10 @@ struct InvalidOpLowering : public OpRewritePattern<yul::InvalidOp> {
 
   LogicalResult matchAndRewrite(yul::InvalidOp op,
                                 PatternRewriter &r) const override {
-    mlir::solgen::BuilderExt bExt(r, op.getLoc());
-
     r.replaceOpWithNewOp<LLVM::IntrCallOp>(op, llvm::Intrinsic::evm_invalid,
                                            /*resTy=*/Type{},
                                            /*ins=*/ValueRange{}, "evm.invalid");
-    bExt.createCallToUnreachableWrapper(op->getParentOfType<ModuleOp>());
+    createCallToUnreachableWrapper(r, getModule(op), op.getLoc());
     return success();
   }
 };
@@ -1417,73 +1421,17 @@ struct LoopOpInterfaceLowering
   }
 };
 
-struct ICallOpLowering : public OpConversionPattern<sol::ICallOp> {
-  // This lowering cannot be done in the SolToYul pass because the function
-  // signature matching requires all function signatures to be legalized (i.e.
-  // yul dialect compatible types). This can't be guaranteed if we do this in
-  // the SolToYul pass.
-  using OpConversionPattern<sol::ICallOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(sol::ICallOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &r) const override {
-    Location loc = op.getLoc();
-    mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(getModule(op), r, loc);
-
-    auto calleeArgs = adaptor.getOperands().drop_front();
-    auto calleeTy = mlir::FunctionType::get(
-        r.getContext(), calleeArgs.getTypes(), op.getResultTypes());
-
-    // Collect functions with matching signature.
-    Operation *symTab = SymbolTable::getNearestSymbolTable(op);
-    assert(symTab->hasTrait<OpTrait::SingleBlock>());
-    SmallVector<int64_t> caseIds;
-    SmallVector<sol::FuncOp> caseFns;
-    for (Operation &op : symTab->getRegions().front().front()) {
-      auto fn = dyn_cast<sol::FuncOp>(op);
-      if (!fn)
-        continue;
-      if (fn.getId() && fn.getFunctionType() == calleeTy) {
-        caseFns.push_back(fn);
-        caseIds.push_back(*fn.getId());
-      }
-    }
-
-    // Generate the dispatch table
-    auto switchOp = r.create<scf::IndexSwitchOp>(
-        loc, op.getResultTypes(), bExt.genCastToIdx(adaptor.getCallee()),
-        caseIds, caseIds.size());
-    for (size_t i = 0; i < caseFns.size(); ++i) {
-      r.setInsertionPointToStart(&switchOp.getCaseRegions()[i].emplaceBlock());
-      auto call = r.create<sol::CallOp>(loc, caseFns[i], calleeArgs);
-      r.create<scf::YieldOp>(loc, call.getResults());
-    }
-
-    // Generate the default case region that panics.
-    r.setInsertionPointToStart(&switchOp.getDefaultRegion().emplaceBlock());
-    evmB.genPanic(mlir::evm::PanicCode::InvalidInternalFunction);
-    SmallVector<Value> undefs;
-    undefs.reserve(op.getNumResults());
-    for (Type ty : op.getResultTypes())
-      undefs.push_back(r.create<LLVM::UndefOp>(loc, ty));
-    r.create<scf::YieldOp>(loc, undefs);
-    r.replaceOp(op, switchOp.getResults());
-    return success();
-  }
-};
-
 struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
   using OpRewritePattern<yul::ObjectOp>::OpRewritePattern;
 
   // "Moves" the yul.object to the module.
   void moveObjToMod(yul::ObjectOp obj, ModuleOp mod, PatternRewriter &r) const {
     Location loc = obj.getLoc();
-    mlir::solgen::BuilderExt bExt(r, loc);
     OpBuilder::InsertionGuard insertGuard(r);
 
     // Generate the entry function.
-    sol::FuncOp entryFn = bExt.getOrInsertFuncOp(
-        "__entry", r.getFunctionType({}, {}), LLVM::Linkage::External, mod);
+    func::FuncOp entryFn = getOrInsertFuncOp(
+        r, mod, "__entry", r.getFunctionType({}, {}), LLVM::Linkage::External);
     Block *modBlk = mod.getBody();
 
     // The entry code is all ops in the object that are neither a function nor
@@ -1495,7 +1443,7 @@ struct ObjectOpLowering : public OpRewritePattern<yul::ObjectOp> {
     for (Region &region : obj->getRegions())
       for (Block &block : region)
         for (Operation &nestedOp : llvm::make_early_inc_range(block))
-          if (isa<sol::FuncOp>(nestedOp) || isa<yul::FuncOp>(nestedOp) ||
+          if (isa<func::FuncOp>(nestedOp) || isa<yul::FuncOp>(nestedOp) ||
               isa<yul::ObjectOp>(nestedOp) || isa<LLVM::GlobalOp>(nestedOp))
             nestedOp.moveBefore(modBlk, modBlk->end());
 
@@ -1615,7 +1563,6 @@ void evm::populateYulPats(RewritePatternSet &pats) {
       Create2OpLowering,
       MLoadOpLowering,
       MSizeOpLowering,
-      LoadImmutableOpLowering,
       LoadImmutable2OpLowering,
       LinkerSymbolOpLowering,
       MStoreOpLowering,
@@ -1629,7 +1576,6 @@ void evm::populateYulPats(RewritePatternSet &pats) {
       StaticCallOpLowering,
       DelegateCallOpLowering,
       BuiltinRetOpLowering,
-      ICallOpLowering,
       ObjectOpLowering
       // clang-format on
       >(pats.getContext());

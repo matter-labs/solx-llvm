@@ -14,7 +14,6 @@
 #include "mlir/Conversion/SolToStandard/EVMConstants.h"
 #include "mlir/Conversion/SolToStandard/EVMUtil.h"
 #include "mlir/Conversion/SolToStandard/Util.h"
-#include "mlir/Conversion/SolToStandard/YulToStandard.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
@@ -2083,7 +2082,7 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
   }
 };
 
-struct LoadImmutableOpLowering
+struct LoadImmutableMetadataConversion
     : public OpConversionPattern<sol::LoadImmutableOp> {
   using OpConversionPattern<sol::LoadImmutableOp>::OpConversionPattern;
 
@@ -2104,6 +2103,38 @@ struct LoadImmutableOpLowering
       return failure();
     r.replaceOpWithNewOp<sol::LoadImmutableOp>(op, newResTys,
                                                adaptor.getOperands(), attrs);
+    return success();
+  }
+};
+
+struct LoadImmutableToYulLowering
+    : public OpConversionPattern<sol::LoadImmutableOp> {
+  using OpConversionPattern<sol::LoadImmutableOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::LoadImmutableOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+
+    bool inRuntime = op->getParentOfType<sol::FuncOp>().getRuntime();
+    Value repl;
+    if (inRuntime) {
+      repl = r.create<yul::LoadImmutableOp>(loc, op.getName());
+    } else {
+      assert(op->hasAttr("addr"));
+      IntegerAttr addr = cast<IntegerAttr>(op->getAttr("addr"));
+      repl = r.create<yul::MLoadOp>(loc, bExt.genI256Const(addr.getValue()));
+    }
+
+    if (auto intTy = dyn_cast<IntegerType>(op.getType())) {
+      // TODO: Check if we need to call genIntCastWithBoolCleanup here.
+      Value castedRepl =
+          bExt.genIntCast(intTy.getWidth(), intTy.isSigned(), repl);
+      r.replaceOp(op, castedRepl);
+      return success();
+    }
+
+    r.replaceOp(op, repl);
     return success();
   }
 };
@@ -3715,8 +3746,8 @@ struct CallOpLowering : public OpConversionPattern<sol::CallOp> {
     if (failed(getTypeConverter()->convertTypes(op.getResultTypes(),
                                                 convertedResTys)))
       return failure();
-    r.replaceOpWithNewOp<func::CallOp>(op, op.getCallee(), convertedResTys,
-                                       adaptor.getOperands());
+    r.replaceOpWithNewOp<yul::FuncCallOp>(
+        op, convertedResTys, op.getCalleeAttr(), adaptor.getOperands());
     return success();
   }
 };
@@ -3726,7 +3757,7 @@ struct ReturnOpLowering : public OpConversionPattern<sol::ReturnOp> {
 
   LogicalResult matchAndRewrite(sol::ReturnOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
-    r.replaceOpWithNewOp<func::ReturnOp>(op, adaptor.getOperands());
+    r.replaceOpWithNewOp<yul::FuncReturnOp>(op, adaptor.getOperands());
     return success();
   }
 };
@@ -3745,23 +3776,72 @@ struct FuncOpLowering : public OpConversionPattern<sol::FuncOp> {
           "llvm.linkage",
           LLVM::LinkageAttr::get(r.getContext(), LLVM::Linkage::Private)));
 
-    // Add the nofree and null_pointer_is_valid attributes of llvm via the
-    // passthrough attribute.
-    std::vector<Attribute> passthroughAttrs;
-    passthroughAttrs.push_back(r.getStringAttr("nofree"));
-    passthroughAttrs.push_back(r.getStringAttr("null_pointer_is_valid"));
-    attrs.push_back(r.getNamedAttr(
-        "passthrough", ArrayAttr::get(r.getContext(), passthroughAttrs)));
-
-    // TODO: Add additional attribute for -O0 and -Oz
-
     auto convertedFuncTy = cast<FunctionType>(
         getTypeConverter()->convertType(op.getFunctionType()));
     // FIXME: The location of the block arguments are lost here!
-    auto newOp = r.create<func::FuncOp>(op.getLoc(), op.getName(),
-                                        convertedFuncTy, attrs);
-    r.inlineRegionBefore(op.getBody(), newOp.getBody(), newOp.end());
+    auto newOp =
+        r.create<yul::FuncOp>(op.getLoc(), op.getName(), convertedFuncTy);
+    for (NamedAttribute attr : attrs)
+      newOp->setAttr(attr.getName(), attr.getValue());
+    r.inlineRegionBefore(op.getBody(), newOp.getBody(), newOp.getBody().end());
     r.eraseOp(op);
+    return success();
+  }
+};
+
+struct ICallOpLowering : public OpConversionPattern<sol::ICallOp> {
+  // This lowering runs after Sol signatures are legalized but before sol.func
+  // is lowered, so the dispatch table can still inspect the Sol symbol table.
+  using OpConversionPattern<sol::ICallOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::ICallOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
+
+    auto calleeArgs = adaptor.getOperands().drop_front();
+    auto calleeTy = mlir::FunctionType::get(
+        r.getContext(), calleeArgs.getTypes(), op.getResultTypes());
+
+    // Collect functions with matching signature.
+    Operation *symTab = SymbolTable::getNearestSymbolTable(op);
+    bool callerRuntime = op->getParentOfType<sol::FuncOp>().getRuntime();
+    SmallVector<int64_t> caseIds;
+    SmallVector<sol::FuncOp> caseFns;
+    symTab->walk([&](sol::FuncOp fn) {
+      // At this stage the nearest Sol symbol table can still contain both
+      // creation and runtime functions. Internal function pointers are only
+      // valid within the caller's phase, so do not dispatch across that
+      // boundary just because the id and signature match.
+      if (fn.getRuntime() != callerRuntime)
+        return;
+      if (fn.getId() && fn.getFunctionType() == calleeTy) {
+        caseFns.push_back(fn);
+        caseIds.push_back(*fn.getId());
+      }
+    });
+
+    auto switchOp = r.create<scf::IndexSwitchOp>(
+        loc, op.getResultTypes(), bExt.genCastToIdx(adaptor.getCallee()),
+        caseIds, caseIds.size());
+    for (size_t i = 0; i < caseFns.size(); ++i) {
+      r.setInsertionPointToStart(&switchOp.getCaseRegions()[i].emplaceBlock());
+      auto call = r.create<yul::FuncCallOp>(loc, op.getResultTypes(),
+                                            FlatSymbolRefAttr::get(caseFns[i]),
+                                            calleeArgs);
+      r.create<scf::YieldOp>(loc, call.getResults());
+    }
+
+    r.setInsertionPointToStart(&switchOp.getDefaultRegion().emplaceBlock());
+    evmB.genPanic(mlir::evm::PanicCode::InvalidInternalFunction);
+    SmallVector<Value> undefs;
+    undefs.reserve(op.getNumResults());
+    for (Type ty : op.getResultTypes())
+      undefs.push_back(r.create<LLVM::UndefOp>(loc, ty));
+    r.create<scf::YieldOp>(loc, undefs);
+
+    r.replaceOp(op, switchOp.getResults());
     return success();
   }
 };
@@ -4187,10 +4267,10 @@ void evm::populateMemPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<AllocaOpLowering, MallocOpLowering, ArrayLitOpLowering,
            GetCallDataOpLowering, DefaultCallDataOpLowering, PushOpLowering,
            PopOpLowering, GepOpLowering, MapOpLowering, LoadOpLowering,
-           LoadImmutableOpLowering, StoreOpLowering, DataLocCastOpLowering,
-           LengthOpLowering, SliceOpLowering, CopyOpLowering,
-           PushStringOpLowering, StringLitOpLowering, ConcatOpLowering>(
-      tyConv, pats.getContext());
+           LoadImmutableMetadataConversion, StoreOpLowering,
+           DataLocCastOpLowering, LengthOpLowering, SliceOpLowering,
+           CopyOpLowering, PushStringOpLowering, StringLitOpLowering,
+           ConcatOpLowering>(tyConv, pats.getContext());
   pats.add<AddrOfOpLowering>(pats.getContext());
 }
 
@@ -4199,9 +4279,19 @@ void evm::populateControlFlowPats(RewritePatternSet &pats) {
       pats.getContext());
 }
 
-void evm::populateFuncPats(RewritePatternSet &pats, TypeConverter &tyConv) {
-  pats.add<CallOpLowering, ReturnOpLowering, FuncOpLowering>(tyConv,
-                                                             pats.getContext());
+void evm::populateFuncBoundaryPats(RewritePatternSet &pats,
+                                   TypeConverter &tyConv) {
+  pats.add<CallOpLowering, ReturnOpLowering>(tyConv, pats.getContext());
+}
+
+void evm::populateFuncOpPats(RewritePatternSet &pats, TypeConverter &tyConv) {
+  pats.add<FuncOpLowering>(tyConv, pats.getContext());
+}
+
+void evm::populateLateSolToYulPats(RewritePatternSet &pats,
+                                   TypeConverter &tyConv) {
+  pats.add<ICallOpLowering, LoadImmutableToYulLowering>(tyConv,
+                                                        pats.getContext());
 }
 
 void evm::populateAddrPat(RewritePatternSet &pats, TypeConverter &tyConv) {
@@ -4252,7 +4342,7 @@ void evm::populateStage1Pats(RewritePatternSet &pats, TypeConverter &tyConv) {
   populateControlFlowPats(pats);
 }
 
-void evm::populateStage2Pats(RewritePatternSet &pats) {
+void evm::populateStage2Pats(RewritePatternSet &pats, TypeConverter &tyConv) {
   populateContractPat(pats);
-  populateYulPats(pats);
+  populateLateSolToYulPats(pats, tyConv);
 }
