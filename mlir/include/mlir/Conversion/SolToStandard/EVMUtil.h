@@ -126,13 +126,21 @@ public:
 
   /// Generates the memory allocation code.
   Value genMemAlloc(Type ty, bool zeroInit, ValueRange initVals, Value sizeVar,
+                    Type sizeVarTy,
                     std::optional<Location> locArg = std::nullopt);
 
-  /// Returns a normalized scalar value for ABI encoding and emits range checks
-  /// to match Yul cleanup/validator behavior.
-  Value normalizeABIScalarForEncoding(
-      Type ty, Value val, Location loc,
-      std::optional<sol::DataLocation> srcDataLoc = std::nullopt);
+  /// Cleans up a promoted Solidity integer value according to width/sign.
+  Value genIntCleanup(unsigned width, bool isSigned, Value val,
+                      std::optional<Location> locArg = std::nullopt);
+
+  /// Cleans up a Solidity scalar value. Scalar validation failures use
+  /// ABI-style revert when \p shouldRevert is set; otherwise cleanup-time enum
+  /// validation uses panic.
+  Value genCleanup(Type ty, Value val,
+                   std::optional<Location> locArg = std::nullopt,
+                   bool shouldRevert = false);
+  Value genCleanup(Type ty, Value val, std::optional<Location> locArg,
+                   std::optional<sol::DataLocation> srcDataLoc);
 
 private:
   Value genMemAlloc(Type ty, bool zeroInit, ValueRange initVals, Value sizeVar,

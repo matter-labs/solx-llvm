@@ -25,42 +25,6 @@
 using namespace mlir;
 using namespace mlir::solgen;
 
-Value BuilderExt::genIntCast(unsigned width, bool isSigned, Value val,
-                             std::optional<Location> locArg) {
-  auto srcType = cast<IntegerType>(val.getType());
-  assert(srcType.isSignless());
-  auto dstSignlessType = b.getIntegerType(width);
-
-  Location loc = locArg ? *locArg : defLoc;
-
-  if (srcType == dstSignlessType)
-    return val;
-  if (srcType.getWidth() > width)
-    return b.create<yul::ArithTruncIOp>(loc, dstSignlessType, val);
-  if (isSigned)
-    return b.create<yul::ArithExtSIOp>(loc, dstSignlessType, val);
-  return b.create<yul::ArithExtUIOp>(loc, dstSignlessType, val);
-}
-
-Value BuilderExt::genIntCastWithBoolCleanup(unsigned width, bool isSigned,
-                                            Value val,
-                                            std::optional<Location> locArg,
-                                            bool maskBoolAsStorageByte) {
-  auto srcType = cast<IntegerType>(val.getType());
-  if (width == 1 && srcType.getWidth() > 1) {
-    Location loc = locArg ? *locArg : defLoc;
-    if (maskBoolAsStorageByte) {
-      Value lowBitsMask = b.create<yul::ConstantOp>(
-          loc, b.getIntegerAttr(srcType,
-                                APInt::getLowBitsSet(srcType.getWidth(), 8)));
-      val = b.create<yul::AndOp>(loc, val, lowBitsMask);
-    }
-    Value zero = b.create<yul::ConstantOp>(loc, b.getIntegerAttr(srcType, 0));
-    return genCmp(yul::CmpPredicate::ne, val, zero, loc);
-  }
-  return genIntCast(width, isSigned, val, locArg);
-}
-
 Value BuilderExt::genLLVMStruct(ValueRange vals,
                                 std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;

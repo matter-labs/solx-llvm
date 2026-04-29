@@ -23,11 +23,10 @@ evm::SolTypeConverter::SolTypeConverter() {
 
   // Integer type
   addConversion([&](IntegerType ty) -> Type {
-    // Map to signless variant.
-
-    if (ty.isSignless())
-      return ty;
-    return IntegerType::get(ty.getContext(), ty.getWidth(),
+    // Sol-to-Yul promotes all Solidity integer-like scalar carriers, including
+    // bool, to the Yul word type. Individual lowering patterns still use the
+    // original Sol type to preserve signedness and width-specific cleanup.
+    return IntegerType::get(ty.getContext(), /*width=*/256,
                             IntegerType::Signless);
   });
 

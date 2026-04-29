@@ -55,8 +55,8 @@ def Sol_ConstantOp : Op<Sol_Dialect, "constant",
 def Sol_CastOp : Sol_Op<"cast",
   [Pure, DeclareOpInterfaceMethods<CastOpInterface>]
 >{
-  let arguments = (ins Sol_Int:$inp);
-  let results = (outs Sol_Int:$out);
+  let arguments = (ins AnyInteger:$inp);
+  let results = (outs AnyInteger:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
   let hasFolder = 1;
@@ -90,7 +90,7 @@ def Sol_EnumCastOp : Sol_Op<"enum_cast",
   [DeclareOpInterfaceMethods<CastOpInterface>]
 >{
   let arguments = (ins Sol_Int:$inp);
-  let results = (outs Sol_EnumType:$out);
+  let results = (outs Sol_Int:$out);
 
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
 }
@@ -123,7 +123,7 @@ def Sol_CAddOp : Sol_IntArithOp<"cadd", [Commutative]>;
 def Sol_CSubOp : Sol_IntArithOp<"csub">;
 def Sol_CMulOp : Sol_IntArithOp<"cmul", [Commutative]>;
 def Sol_CDivOp : Sol_IntArithOp<"cdiv">;
-def Sol_CExpOp : Sol_IntArithOp<"cexp">;
+def Sol_CExpOp : Sol_IntExpOp<"cexp">;
 
 def Sol_AddOp : Sol_UncheckedIntArithOp<"add", [Commutative]> {
   // TODO: folder, canonicalizer
@@ -140,7 +140,7 @@ def Sol_DivOp : Sol_UncheckedIntArithOp<"div"> {
 def Sol_ModOp : Sol_UncheckedIntArithOp<"mod"> {
   // TODO: folder, canonicalizer
 }
-def Sol_ExpOp : Sol_UncheckedIntArithOp<"exp"> {
+def Sol_ExpOp : Sol_IntExpOp<"exp", [Pure]> {
   // TODO: folder, canonicalizer
 }
 def Sol_ShlOp : Sol_UncheckedIntArithOp<"shl"> {
@@ -157,6 +157,15 @@ def Sol_OrOp : Sol_UncheckedIntArithOp<"or", [Commutative]> {
 }
 def Sol_XorOp : Sol_UncheckedIntArithOp<"xor", [Commutative]> {
   // TODO: folder, canonicalizer
+}
+
+def Sol_NotOp : Sol_Op<"not", [Pure, SameOperandsAndResultType]> {
+  let summary = "Represents Solidity bitwise not";
+
+  let arguments = (ins Sol_Int:$value);
+  let results = (outs Sol_Int:$result);
+
+  let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
 def Sol_AddModOp : Sol_ModOp<"addmod">;
@@ -942,7 +951,8 @@ def Sol_GasLeftOp : Sol_Op<"gasleft"> {
 
 def Sol_ExtCallOp : Sol_Op<"ext_call", [CallOpInterface]> {
   let arguments = (ins StrAttr:$callee, Variadic<AnyType>:$ins,
-                       Sol_AddressType:$addr, UI256:$gas, UI256:$val,
+                       AnyTypeOf<[Sol_AddressType, UI256]>:$addr,
+                       UI256:$gas, UI256:$val,
                        UI256:$selector,
                        UnitAttr:$try_call, UnitAttr:$static_call,
                        UnitAttr:$delegate_call,

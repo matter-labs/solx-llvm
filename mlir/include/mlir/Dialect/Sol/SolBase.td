@@ -271,6 +271,15 @@ class Sol_IntArithOp<string mnemonic, list<Trait> traits = []> :
 class Sol_UncheckedIntArithOp<string mnemonic, list<Trait> traits = []> :
     Sol_IntArithOp<mnemonic, traits # [Pure]>;
 
+class Sol_IntExpOp<string mnemonic, list<Trait> traits = []> :
+    Sol_Op<mnemonic, traits # [AllTypesMatch<["lhs", "result"]>]> {
+  let arguments = (ins Sol_Int:$lhs, AnyUnsignedInteger:$rhs);
+  let results = (outs Sol_Int:$result);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` "
+                       "type($rhs) `->` type($result)";
+}
+
 class Sol_ModOp<string mnemonic, list<Trait> traits = []>
     : Sol_Op<mnemonic, traits#[SameOperandsAndResultType]> {
   let arguments = (ins AnyUnsignedInteger:$x, AnyUnsignedInteger:$y,

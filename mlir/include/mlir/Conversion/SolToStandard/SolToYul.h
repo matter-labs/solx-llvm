@@ -56,7 +56,7 @@ void populateAbiPats(RewritePatternSet &pats, TypeConverter &tyConv);
 void populateExtCallPat(RewritePatternSet &pats, TypeConverter &tyConv);
 
 /// Adds the conversion patterns of control flow ops in the sol dialect.
-void populateControlFlowPats(RewritePatternSet &pats);
+void populateControlFlowPats(RewritePatternSet &pats, TypeConverter &tyConv);
 
 /// Adds the conversion patterns of sol.call and sol.return.
 void populateFuncBoundaryPats(RewritePatternSet &pats, TypeConverter &tyConv);

@@ -79,8 +79,7 @@ OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
 
 bool CastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
   assert(inputs.size() == 1 && outputs.size() == 1);
-  return isa<IntegerType, sol::EnumType>(inputs.front()) &&
-         isa<IntegerType>(outputs.front());
+  return isa<IntegerType>(inputs.front()) && isa<IntegerType>(outputs.front());
 }
 
 OpFoldResult AddressCastOp::fold(FoldAdaptor) {
@@ -124,8 +123,10 @@ bool ContractCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
 
 bool EnumCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
   assert(inputs.size() == 1 && outputs.size() == 1);
-  return isa<IntegerType>(inputs.front()) &&
-         isa<sol::EnumType>(outputs.front());
+  return (isa<IntegerType>(inputs.front()) &&
+          isa<sol::EnumType>(outputs.front())) ||
+         (isa<sol::EnumType>(inputs.front()) &&
+          isa<IntegerType>(outputs.front()));
 }
 
 bool BytesCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
@@ -220,15 +221,14 @@ static bool mayTrapOnLoad(sol::LoadOp op) {
   Type ty = ptrTy.getPointeeType();
   DataLocation dataLoc = ptrTy.getDataLocation();
 
-  if (dataLoc == DataLocation::CallData) {
-    if (auto intTy = dyn_cast<IntegerType>(ty))
-      return intTy.getWidth() < 256;
-    if (auto bytesTy = dyn_cast<FixedBytesType>(ty))
-      return bytesTy.getSize() < 32;
-    return isa<EnumType>(ty) || isAddressLikeType(ty) ||
-           isa<ExtFuncRefType>(ty);
-  }
-  return dataLoc == DataLocation::Memory && isa<EnumType>(ty);
+  if (dataLoc != DataLocation::CallData)
+    return false;
+
+  if (auto intTy = dyn_cast<IntegerType>(ty))
+    return intTy.getWidth() < 256;
+  if (auto bytesTy = dyn_cast<FixedBytesType>(ty))
+    return bytesTy.getSize() < 32;
+  return isa<EnumType>(ty) || isAddressLikeType(ty) || isa<ExtFuncRefType>(ty);
 }
 } // namespace
 

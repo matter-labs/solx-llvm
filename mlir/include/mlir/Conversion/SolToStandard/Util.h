@@ -48,68 +48,32 @@ class BuilderExt {
   OpBuilder &b;
   Location defLoc;
 
+  Value genConst(llvm::APInt const &val,
+                 std::optional<Location> locArg = std::nullopt) {
+    assert(val.getBitWidth() == 256);
+    IntegerType ty = b.getIntegerType(256);
+    auto op = b.create<yul::ConstantOp>(locArg ? *locArg : defLoc,
+                                        b.getIntegerAttr(ty, val));
+    return op.getResult();
+  }
+
 public:
   explicit BuilderExt(OpBuilder &b) : b(b), defLoc(b.getUnknownLoc()) {}
 
   explicit BuilderExt(OpBuilder &b, Location loc) : b(b), defLoc(loc) {}
 
   Value genBool(bool val, std::optional<Location> locArg = std::nullopt) {
-    IntegerType ty = b.getIntegerType(1);
-    auto op = b.create<yul::ConstantOp>(locArg ? *locArg : defLoc,
-                                        b.getIntegerAttr(ty, val));
-    return op.getResult();
-  }
-
-  Value genConst(llvm::APInt const &val, unsigned width,
-                 std::optional<Location> locArg = std::nullopt) {
-    IntegerType ty = b.getIntegerType(width);
-    auto op = b.create<yul::ConstantOp>(locArg ? *locArg : defLoc,
-                                        b.getIntegerAttr(ty, val));
-    return op.getResult();
-  }
-
-  Value genConst(llvm::APInt const &val,
-                 std::optional<Location> locArg = std::nullopt) {
-    IntegerType ty = b.getIntegerType(val.getBitWidth());
-    auto op = b.create<yul::ConstantOp>(locArg ? *locArg : defLoc,
-                                        b.getIntegerAttr(ty, val));
-    return op.getResult();
-  }
-
-  Value genConst(int64_t val, unsigned width = 64,
-                 std::optional<Location> locArg = std::nullopt) {
-    return genConst(llvm::APInt(width, val, /*isSigned=*/true), width, locArg);
-  }
-
-  Value genConst(std::string const &val, unsigned width,
-                 std::optional<Location> locArg = std::nullopt) {
-    uint8_t radix = 10;
-    llvm::StringRef intStr = val;
-    if (intStr.consume_front("0x")) {
-      radix = 16;
-    }
-
-    return genConst(llvm::APInt(width, intStr, radix), width, locArg);
+    return genConst(llvm::APInt(256, val), locArg);
   }
 
   Value genI256Const(llvm::APInt const &val,
                      std::optional<Location> locArg = std::nullopt) {
-
-    if (val.getBitWidth() != 256) {
-      assert(val.getBitWidth() < 256);
-      return genConst(val.zext(256), 256, locArg);
-    }
-    return genConst(val, 256, locArg);
-  }
-
-  Value genI256Const(std::string const &val,
-                     std::optional<Location> locArg = std::nullopt) {
-    return genConst(val, 256, locArg);
+    return genConst(val, locArg);
   }
 
   Value genI256Const(int64_t val,
                      std::optional<Location> locArg = std::nullopt) {
-    return genConst(val, 256, locArg);
+    return genConst(llvm::APInt(256, val, /*isSigned=*/true), locArg);
   }
 
   /// Generates an i256 constant with the selector in the high 32 bits.
@@ -120,22 +84,10 @@ public:
     return genI256Const(evm::selectorFromSignatureU256(signature), loc);
   }
 
-  /// Generates a Yul cast op (if required) (as per the desired width and
-  /// signedness) of the signless typed value.
-  Value genIntCast(unsigned width, bool isSigned, Value val,
-                   std::optional<Location> locArg = std::nullopt);
-
-  /// Same as genIntCast, except bool types use 'x != 0' cleanup semantics
-  // (same as Yul) instead of truncation. If maskBoolAsStorageByte is true,
-  // bool cleanup first masks to low 8 bits (storage bool semantics).
-  Value genIntCastWithBoolCleanup(unsigned width, bool isSigned, Value val,
-                                  std::optional<Location> locArg = std::nullopt,
-                                  bool maskBoolAsStorageByte = false);
-
   Value genCmp(yul::CmpPredicate predicate, Value lhs, Value rhs,
                std::optional<Location> locArg = std::nullopt) {
-    return b.create<yul::CmpOp>(locArg ? *locArg : defLoc, b.getI1Type(),
-                                predicate, lhs, rhs);
+    return b.create<yul::CmpOp>(locArg ? *locArg : defLoc,
+                                b.getIntegerType(256), predicate, lhs, rhs);
   }
 
   yul::IfOp createIf(TypeRange resultTypes, Value cond,

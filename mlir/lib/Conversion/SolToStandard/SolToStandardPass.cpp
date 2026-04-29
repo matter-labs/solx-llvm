@@ -113,6 +113,7 @@ struct ConvertSolToStandardPass
         sol::AndOp,
         sol::OrOp,
         sol::XorOp,
+        sol::NotOp,
         sol::ShlOp,
         sol::ShrOp,
         sol::CmpOp,

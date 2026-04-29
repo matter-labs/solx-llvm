@@ -788,11 +788,47 @@ int64_t evm::getMallocSize(Type ty) {
   return 32;
 }
 
-Value evm::Builder::normalizeABIScalarForEncoding(
-    Type ty, Value val, Location loc,
-    std::optional<sol::DataLocation> srcDataLoc) {
+Value evm::Builder::genIntCleanup(unsigned width, bool isSigned, Value val,
+                                  std::optional<Location> locArg) {
+  [[maybe_unused]] auto srcType = cast<IntegerType>(val.getType());
+  assert(srcType.isSignless());
+  assert(width <= 256 && "Expected integer width <= 256");
+  assert(srcType.getWidth() == 256 &&
+         "Yul integer cleanup expects promoted i256 values");
+
+  if (width == 256)
+    return val;
+
+  Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
+
+  // For bool, use `x != 0` semantics.
+  if (width == 1)
+    return bExt.genCmp(yul::CmpPredicate::ne, val, bExt.genI256Const(0, loc),
+                       loc);
+
+  if (!isSigned) {
+    APInt mask = APInt::getLowBitsSet(256, width);
+    return b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+  }
+
+  assert(width % 8 == 0 && "signed Yul cleanup expects byte-aligned widths");
+  Value off = bExt.genI256Const((width / 8) - 1, loc);
+  return b.create<yul::SignExtendOp>(loc, off, val);
+}
+
+Value evm::Builder::genCleanup(Type ty, Value val,
+                               std::optional<Location> locArg,
+                               std::optional<sol::DataLocation> srcDataLoc) {
   bool fromCalldata = srcDataLoc && *srcDataLoc == sol::DataLocation::CallData;
+  return genCleanup(ty, val, locArg, /*shouldRevert=*/fromCalldata);
+}
+
+Value evm::Builder::genCleanup(Type ty, Value val,
+                               std::optional<Location> locArg,
+                               bool shouldRevert) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
 
   if (auto intTy = dyn_cast<IntegerType>(ty)) {
     if (intTy.getWidth() == 256)
@@ -800,77 +836,68 @@ Value evm::Builder::normalizeABIScalarForEncoding(
 
     assert(intTy.getWidth() < 256 &&
            "Expected integer types no wider than 256 bits");
-    auto valTy = cast<IntegerType>(val.getType());
-    assert((valTy.getWidth() == intTy.getWidth() || valTy.getWidth() == 256) &&
-           "Expected integer value with source width or i256 width");
 
-    // If the value is already at source width, only widen to i256 for storing.
-    if (valTy.getWidth() == intTy.getWidth())
-      return bExt.genIntCast(/*width=*/256, intTy.isSigned(), val, loc);
-
-    // For bool, use 'x != 0' cleanup, otherwise regular integer cast.
-    Value trunc = bExt.genIntCastWithBoolCleanup(intTy.getWidth(),
-                                                 intTy.isSigned(), val, loc);
-
-    // Finally, extend to 256 bits.
-    Value normalized =
-        bExt.genIntCast(/*width=*/256, intTy.isSigned(), trunc, loc);
-    if (fromCalldata) {
-      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, normalized);
+    Value cleaned = genIntCleanup(intTy.getWidth(), intTy.isSigned(), val, loc);
+    if (shouldRevert) {
+      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, cleaned);
       genRevert(revertCond, loc);
     }
-    return normalized;
+    return cleaned;
   }
 
   if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
-    Value normalized =
-        bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
-    Value revertCond = bExt.genCmp(yul::CmpPredicate::ugt, normalized,
+    Value revertCond = bExt.genCmp(yul::CmpPredicate::ugt, val,
                                    bExt.genI256Const(enumTy.getMax()));
-    if (fromCalldata)
+    if (shouldRevert)
       genRevert(revertCond, loc);
     else
       genPanic(mlir::evm::PanicCode::EnumConversionError, revertCond, loc);
-    return normalized;
+    return val;
   }
 
   if (sol::isAddressLikeType(ty)) {
-    Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
     APInt mask = APInt::getLowBitsSet(256, 160);
-    Value normalized =
-        b.create<yul::AndOp>(loc, casted, bExt.genI256Const(mask));
-    if (fromCalldata) {
-      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, casted, normalized);
+    Value cleaned =
+        b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+    if (shouldRevert) {
+      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, cleaned);
       genRevert(revertCond, loc);
     }
-    return normalized;
+    return cleaned;
   }
 
-  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
-    Value casted = bExt.genIntCast(/*width=*/256, /*isSigned=*/false, val, loc);
-    if (bytesTy.getSize() == 32)
-      return casted;
+  if (sol::isBytesLikeType(ty)) {
+    unsigned byteSize = sol::getBytesSize(ty);
+    if (byteSize == 32)
+      return val;
 
-    assert(bytesTy.getSize() < 32 && "Expected fixed-bytes width <= 32");
-    APInt mask = APInt::getHighBitsSet(256, bytesTy.getSize() * 8);
-    Value normalized =
-        b.create<yul::AndOp>(loc, casted, bExt.genI256Const(mask));
-    if (fromCalldata) {
-      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, casted, normalized);
+    assert(byteSize < 32 && "Expected fixed-bytes width <= 32");
+    APInt mask = APInt::getHighBitsSet(256, byteSize * 8);
+    Value cleaned =
+        b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+
+    // For ByteType we should never generate reverts.
+    if (!isa<sol::ByteType>(ty) && shouldRevert) {
+      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, cleaned);
       genRevert(revertCond, loc);
     }
-    return normalized;
+    return cleaned;
   }
 
-  // ExtFuncRef: MSB-aligned like bytes24. Low 64 bits must be zero.
+  if (isa<sol::FuncRefType>(ty)) {
+    APInt mask = APInt::getLowBitsSet(256, 64);
+    return b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+  }
+
   if (isa<sol::ExtFuncRefType>(ty)) {
     APInt mask = APInt::getHighBitsSet(256, 192);
-    Value normalized = b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask));
-    if (fromCalldata) {
-      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, normalized);
+    Value cleaned =
+        b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+    if (shouldRevert) {
+      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, cleaned);
       genRevert(revertCond, loc);
     }
-    return normalized;
+    return cleaned;
   }
 
   return val;
@@ -1060,11 +1087,9 @@ Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
     } else {
       Value addr = dataPtr;
       for (auto val : initVals) {
-        // Zero-extend values before storing them, as skipping this step may
-        // lead to incorrect results. For example, uint8 is stored via mstore8
-        // instead of mstore.
-        Value val256 = bExt.genIntCast(256, /*isSigned=*/false, val);
-        b.create<yul::MStoreOp>(loc, addr, val256);
+        // Clean values before storing full memory words; array literals can
+        // carry dirty high bits in narrow element values.
+        b.create<yul::MStoreOp>(loc, addr, genCleanup(eltTy, val, loc));
         addr = b.create<yul::AddOp>(loc, addr, bExt.genI256Const(32));
       }
     }
@@ -1121,12 +1146,15 @@ Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
 }
 
 Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
-                                Value sizeVar, std::optional<Location> locArg) {
+                                Value sizeVar, Type sizeVarTy,
+                                std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  if (sizeVar)
-    sizeVar = bExt.genIntCast(256, false, sizeVar);
+  // If sizeVar and sizeVarTy are provided, insert cleanup for sizeVar. This is
+  // necessary as sizeVar may contain dirty high bits.
+  if (sizeVar && sizeVarTy)
+    sizeVar = genCleanup(sizeVarTy, sizeVar, loc);
 
   return genMemAlloc(ty, zeroInit, initVals, sizeVar,
                      /*recDepth=*/-1, loc);
@@ -1455,10 +1483,15 @@ Value evm::Builder::genCleanupPackedStorageValue(
                                      bExt.genI256Const(256 - numBits, loc));
   }
 
-  if (auto intTy = dyn_cast<IntegerType>(eltTy))
-    return bExt.genIntCastWithBoolCleanup(intTy.getWidth(), intTy.isSigned(),
-                                          value, loc,
-                                          /*maskBoolAsStorageByte=*/true);
+  if (auto intTy = dyn_cast<IntegerType>(eltTy)) {
+    // In packed storage, bool occupies one byte. Mask to the loaded storage
+    // byte before applying generic bool cleanup.
+    if (intTy.getWidth() == 1) {
+      APInt mask = APInt::getLowBitsSet(256, 8);
+      value = b.create<yul::AndOp>(loc, value, bExt.genI256Const(mask, loc));
+    }
+    return genIntCleanup(intTy.getWidth(), intTy.isSigned(), value, loc);
+  }
 
   if (sol::isAddressLikeType(eltTy)) {
     APInt mask = APInt::getLowBitsSet(256, 160);
@@ -1571,9 +1604,8 @@ Value evm::Builder::genStorageStringLength(Value lengthSlot,
 
   Value lengthLT32 =
       bExt.genCmp(yul::CmpPredicate::ult, length, bExt.genI256Const(32));
-  Value panicCond = bExt.genCmp(
-      yul::CmpPredicate::eq,
-      bExt.genIntCast(1, /*isSigned=*/false, isOutOfPlaceEnc, loc), lengthLT32);
+  Value panicCond =
+      bExt.genCmp(yul::CmpPredicate::eq, isOutOfPlaceEnc, lengthLT32);
 
   genPanic(mlir::evm::PanicCode::StorageEncodingError, panicCond);
 
@@ -2149,8 +2181,7 @@ Value evm::Builder::genStringItemAddress(Value srcAddr, Value idx,
   Value data = genLoad(srcAddr, sol::DataLocation::Storage, loc);
   Value length = genStorageStringLength(data, loc);
 
-  Value castedIdx = bExt.genIntCast(256, /*isSigned*/ false, idx);
-  auto panicCond = bExt.genCmp(yul::CmpPredicate::uge, castedIdx, length);
+  auto panicCond = bExt.genCmp(yul::CmpPredicate::uge, idx, length);
   genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, panicCond);
 
   Value isOutOfPlace =
@@ -2162,7 +2193,7 @@ Value evm::Builder::genStringItemAddress(Value srcAddr, Value idx,
            genDataAddrPtr(srcAddr, sol::DataLocation::Storage), srcAddr)
           .getResult();
 
-  return genPackedStorageAddr(dataSlot, castedIdx, bytes1Ty,
+  return genPackedStorageAddr(dataSlot, idx, bytes1Ty,
                               /*isDataLeftAligned*/ true);
 }
 
@@ -2429,7 +2460,6 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
 
     // Storage src packed -> Memory: extract and widen each element.
     if (srcPacked && srcIsStorage) {
-      auto i256Ty = b.getIntegerType(256);
       emitCompactStorageArrayReadLoop(
           b, loc, length, dstDataAddr, srcDataAddr, bExt.genI256Const(32),
           srcEltByteSize, srcArrTy.isDynSized(),
@@ -2437,10 +2467,6 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
               Value dstAddr) {
             Value shifted = b.create<yul::ArithShrOp>(loc, slotVal, shiftBits);
             Value val = genCleanupPackedStorageValue(srcEltTy, shifted, loc);
-            // MStore requires i256. zero-extend narrower types (e.g. i8 for
-            // uint8).
-            if (val.getType() != i256Ty)
-              val = b.create<yul::ArithExtUIOp>(loc, i256Ty, val);
             genStore(val, dstAddr, dstDataLoc, loc);
           });
       return;
@@ -2566,37 +2592,10 @@ Value evm::Builder::genABITupleEncoding(
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  // Integer type
-  if (auto intTy = dyn_cast<IntegerType>(ty)) {
-    src = normalizeABIScalarForEncoding(intTy, src, loc, srcDataLoc);
-    b.create<yul::MStoreOp>(loc, dstAddr, src);
-    return tailAddr;
-  }
-
-  // Enum type
-  if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
-    src = normalizeABIScalarForEncoding(enumTy, src, loc, srcDataLoc);
-    b.create<yul::MStoreOp>(loc, dstAddr, src);
-    return tailAddr;
-  }
-
-  // Address type
-  if (sol::isAddressLikeType(ty)) {
-    src = normalizeABIScalarForEncoding(ty, src, loc, srcDataLoc);
-    b.create<yul::MStoreOp>(loc, dstAddr, src);
-    return tailAddr;
-  }
-
-  // Bytes type
-  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
-    src = normalizeABIScalarForEncoding(bytesTy, src, loc, srcDataLoc);
-    b.create<yul::MStoreOp>(loc, dstAddr, src);
-    return tailAddr;
-  }
-
-  // External function ref
-  if (isa<sol::ExtFuncRefType>(ty)) {
-    src = normalizeABIScalarForEncoding(ty, src, loc, srcDataLoc);
+  if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
+      sol::isAddressLikeType(ty) || isa<sol::FixedBytesType>(ty) ||
+      isa<sol::ExtFuncRefType>(ty)) {
+    src = genCleanup(ty, src, loc, srcDataLoc);
     b.create<yul::MStoreOp>(loc, dstAddr, src);
     return tailAddr;
   }
@@ -2901,12 +2900,12 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
 
     // bool is stored as uint8 in packed encoding.
     unsigned byteSize = isBool ? 1 : bitWidth / 8;
-    Value normalized = normalizeABIScalarForEncoding(intTy, val, loc);
+    Value cleaned = genCleanup(intTy, val, loc);
     if (byteSize < 32)
-      normalized = b.create<yul::ArithShlOp>(
-          loc, normalized, bExt.genI256Const(256 - byteSize * 8));
+      cleaned = b.create<yul::ArithShlOp>(
+          loc, cleaned, bExt.genI256Const(256 - byteSize * 8));
 
-    b.create<yul::MStoreOp>(loc, addr, normalized);
+    b.create<yul::MStoreOp>(loc, addr, cleaned);
     return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(byteSize));
   }
 
@@ -2914,34 +2913,34 @@ Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
   if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
     assert(enumTy.getMax() <= 255 &&
            "Expected enums with at most 256 elements");
-    Value normalized = normalizeABIScalarForEncoding(enumTy, val, loc);
+    Value cleaned = genCleanup(enumTy, val, loc);
     Value shifted =
-        b.create<yul::ArithShlOp>(loc, normalized, bExt.genI256Const(248));
+        b.create<yul::ArithShlOp>(loc, cleaned, bExt.genI256Const(248));
     b.create<yul::MStoreOp>(loc, addr, shifted);
     return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(1));
   }
 
   // Address type.
   if (sol::isAddressLikeType(ty)) {
-    Value normalized = normalizeABIScalarForEncoding(ty, val, loc);
+    Value cleaned = genCleanup(ty, val, loc);
     Value shifted =
-        b.create<yul::ArithShlOp>(loc, normalized, bExt.genI256Const(96));
+        b.create<yul::ArithShlOp>(loc, cleaned, bExt.genI256Const(96));
     b.create<yul::MStoreOp>(loc, addr, shifted);
     return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(20));
   }
 
   // Bytes type.
   if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
-    Value normalized = normalizeABIScalarForEncoding(bytesTy, val, loc);
-    b.create<yul::MStoreOp>(loc, addr, normalized);
+    Value cleaned = genCleanup(bytesTy, val, loc);
+    b.create<yul::MStoreOp>(loc, addr, cleaned);
     return b.create<yul::AddOp>(loc, addr,
                                 bExt.genI256Const(bytesTy.getSize()));
   }
 
   // External function ref.
   if (isa<sol::ExtFuncRefType>(ty)) {
-    Value normalized = normalizeABIScalarForEncoding(ty, val, loc);
-    b.create<yul::MStoreOp>(loc, addr, normalized);
+    Value cleaned = genCleanup(ty, val, loc);
+    b.create<yul::MStoreOp>(loc, addr, cleaned);
     return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(24));
   }
 
@@ -3005,44 +3004,11 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
     return b.create<yul::CallDataLoadOp>(loc, addr);
   };
 
-  // Integer type
-  if (auto intTy = dyn_cast<IntegerType>(ty)) {
+  if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
+      sol::isAddressLikeType(ty) || isa<sol::FixedBytesType>(ty) ||
+      isa<sol::ExtFuncRefType>(ty)) {
     Value arg = genLoad(addr);
-    if (intTy.getWidth() != 256) {
-      assert(intTy.getWidth() < 256);
-      Value castedArg = bExt.genIntCastWithBoolCleanup(
-          intTy.getWidth(), intTy.isSigned(), arg, loc);
-
-      // Generate a revert check that checks if the decoded value is within in
-      // the range of the integer type.
-      auto revertCond = bExt.genCmp(
-          yul::CmpPredicate::ne, arg,
-          bExt.genIntCast(/*width=*/256, intTy.isSigned(), castedArg));
-      genRevert(revertCond, loc);
-      return castedArg;
-    }
-    return arg;
-  }
-
-  // Enum type
-  if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
-    Value arg = genLoad(addr);
-    // Generate a revert check that checks if the decoded value is within the
-    // range of the enum type.
-    auto revertCond = bExt.genCmp(yul::CmpPredicate::ugt, arg,
-                                  bExt.genI256Const(enumTy.getMax()));
-    genRevert(revertCond, loc);
-    return arg;
-  }
-
-  // Address type
-  if (sol::isAddressLikeType(ty)) {
-    Value arg = genLoad(addr);
-    APInt mask = APInt::getLowBitsSet(256, 160);
-    Value maskedArg = b.create<yul::AndOp>(loc, arg, bExt.genI256Const(mask));
-    auto revertCond = bExt.genCmp(yul::CmpPredicate::ne, arg, maskedArg);
-    genRevert(revertCond, loc);
-    return maskedArg;
+    return genCleanup(ty, arg, loc, /*shouldRevert=*/true);
   }
 
   // Array type
@@ -3108,17 +3074,10 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
                                                         fromMem, tupleStart,
                                                         tupleEnd, loc));
           } else {
-            auto elemVal = genABITupleDecoding(eltTy, iSrcAddr, fromMem,
-                                               tupleStart, tupleEnd, loc);
-            auto intTy = dyn_cast<IntegerType>(elemVal.getType());
-
-            // If the element type is an integer smaller than 256 bits, we need
-            // to extend it. In case we don't do that, store will place the
-            // value in the higher bits, which is incorrect.
-            if (intTy && intTy.getWidth() < 256)
-              elemVal =
-                  bExt.genIntCast(/*width=*/256, intTy.isSigned(), elemVal);
-            b.create<yul::MStoreOp>(loc, iDstAddr, elemVal);
+            b.create<yul::MStoreOp>(loc, iDstAddr,
+                                    genABITupleDecoding(eltTy, iSrcAddr,
+                                                        fromMem, tupleStart,
+                                                        tupleEnd, loc));
           }
 
           Value srcStride = bExt.genI256Const(getCallDataHeadSize(eltTy));
@@ -3127,33 +3086,6 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
               b.create<yul::AddOp>(loc, iSrcAddr, srcStride)};
         });
     return ret;
-  }
-
-  // Bytes type
-  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
-    Value arg = genLoad(addr);
-    if (bytesTy.getSize() != 32) {
-      assert(bytesTy.getSize() < 32);
-      unsigned numBits = bytesTy.getSize() * 8;
-      Value mask = b.create<yul::ArithShlOp>(
-          loc, bExt.genI256Const(APInt::getMaxValue(numBits)),
-          bExt.genI256Const(256 - numBits));
-      Value maskedArg = b.create<yul::AndOp>(loc, arg, mask);
-      auto revertCond = bExt.genCmp(yul::CmpPredicate::ne, arg, maskedArg);
-      genRevert(revertCond, loc);
-    }
-    return arg;
-  }
-
-  // External function ref
-  if (isa<sol::ExtFuncRefType>(ty)) {
-    // Validate low 64 bits are zero.
-    Value arg = genLoad(addr);
-    APInt mask = APInt::getHighBitsSet(256, 192);
-    Value maskedArg = b.create<yul::AndOp>(loc, arg, bExt.genI256Const(mask));
-    auto revertCond = bExt.genCmp(yul::CmpPredicate::ne, arg, maskedArg);
-    genRevert(revertCond, loc);
-    return arg;
   }
 
   // String type
@@ -3227,16 +3159,7 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
                                         tupleEnd, loc);
       }
 
-      // If the element type is an integer smaller than 256 bits, we need
-      // to extend it. In case we don't do that, store will place the
-      // value in the higher bits, which is incorrect.
-      auto intTy = dyn_cast<IntegerType>(memberVal.getType());
-      if (intTy && intTy.getWidth() < 256)
-        memberVal =
-            bExt.genIntCast(/*width=*/256, intTy.isSigned(), memberVal, loc);
-
       b.create<yul::MStoreOp>(loc, dstHeadAddr, memberVal);
-
       srcHeadAddr = b.create<yul::AddOp>(
           loc, srcHeadAddr, bExt.genI256Const(getCallDataHeadSize(memTy)));
       dstHeadAddr =
