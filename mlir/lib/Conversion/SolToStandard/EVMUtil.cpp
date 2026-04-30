@@ -1168,19 +1168,34 @@ Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
 
   // Struct type.
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
-    Value memPtr = genMemAlloc(evm::getMallocSize(ty), loc);
+    Value basePtr = genMemAlloc(evm::getMallocSize(ty), loc);
     assert(structTy.getDataLocation() == sol::DataLocation::Memory);
 
+    uint64_t memOffset = 0;
     for (auto memTy : structTy.getMemberTypes()) {
-      Value initVal;
+      Value memPtr = memOffset == 0
+                         ? basePtr
+                         : b.create<arith::AddIOp>(
+                               loc, basePtr, bExt.genI256Const(memOffset));
       if (isa<sol::StructType>(memTy) || isa<sol::ArrayType>(memTy)) {
-        initVal = genMemAlloc(memTy, zeroInit, {}, sizeVar, recDepth, loc);
+        Value initVal =
+            genMemAlloc(memTy, zeroInit, {}, sizeVar, recDepth, loc);
         b.create<yul::MStoreOp>(loc, memPtr, initVal);
       } else if (zeroInit) {
-        b.create<yul::MStoreOp>(loc, memPtr, bExt.genI256Const(0));
+        // String/bytes fields must point to the zero-bytes sentinel (0x60) so
+        // that dereferencing them yields length=0. When !zeroInit, these slots
+        // are left at 0 (null pointer). This is safe only if the caller writes
+        // every StringType field before any read. A future !zeroInit allocation
+        // that skips a field would silently produce a null pointer dereference.
+        Value zeroVal =
+            isa<sol::StringType>(memTy)
+                ? bExt.genI256Const(mlir::evm::MemoryLayout::zeroPointer)
+                : bExt.genI256Const(0);
+        b.create<yul::MStoreOp>(loc, memPtr, zeroVal);
       }
+      memOffset += 32;
     }
-    return memPtr;
+    return basePtr;
   }
 
   llvm_unreachable("NYI");
