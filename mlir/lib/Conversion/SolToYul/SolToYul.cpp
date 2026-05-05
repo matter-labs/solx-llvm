@@ -3384,9 +3384,26 @@ struct EmitOpLowering : public OpConversionPattern<sol::EmitOp> {
       indexedArgs.push_back(bExt.genI256Const(signatureHash));
     }
     unsigned argIdx = 0;
-    for (Value arg : op.getIndexedArgs())
-      indexedArgs.push_back(
-          evmB.genCleanup(arg.getType(), remappedOperands[argIdx++], loc));
+    for (Value origIdxArg : op.getIndexedArgs()) {
+      Type origTy = origIdxArg.getType();
+      Value val = remappedOperands[argIdx++];
+
+      // Reference-type indexed arg: topic = keccak256(packed_encode(arg)).
+      if (isa<sol::StringType, sol::ArrayType, sol::StructType>(origTy)) {
+        Value scratchStart = evmB.genFreePtr();
+        Value scratchEnd =
+            evmB.genABIPackedEncoding(origTy, val, scratchStart, loc);
+        Value scratchSize =
+            r.create<yul::SubOp>(loc, scratchEnd, scratchStart);
+        indexedArgs.push_back(
+            r.create<yul::Keccak256Op>(loc, scratchStart, scratchSize));
+        continue;
+      }
+
+      // Value-type indexed arg: cleanup-and-widen to i256 (LogOp expects
+      // i256 topics).
+      indexedArgs.push_back(evmB.genCleanup(origTy, val, loc));
+    }
 
     for (Value arg : op.getNonIndexedArgs()) {
       nonIndexedArgsType.push_back(arg.getType());
