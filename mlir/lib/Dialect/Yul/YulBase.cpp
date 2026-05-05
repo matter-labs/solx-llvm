@@ -10,7 +10,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Yul/Yul.h"
 
 #include "mlir/Dialect/Yul/YulInterfaces.cpp.inc"
@@ -29,5 +28,12 @@ void YulDialect::initialize() {
 
 Operation *YulDialect::materializeConstant(OpBuilder &builder, Attribute val,
                                            Type type, Location loc) {
-  return builder.create<arith::ConstantOp>(loc, type, cast<TypedAttr>(val));
+  auto intAttr = dyn_cast<IntegerAttr>(val);
+
+  // Reject non-256 bit integers.
+  if (!type.isInteger(256) || !intAttr || intAttr.getType() != type)
+    return nullptr;
+
+  return builder.create<ConstantOp>(loc,
+                                    IntegerAttr::get(type, intAttr.getValue()));
 }

@@ -79,10 +79,7 @@ void createCallToUnreachableWrapper(PatternRewriter &r, ModuleOp mod,
 // For some dialects, we have to pass i1 instead of i256 for boolean values,
 // so this helper generates Yul like cast to i1 for such cases.
 Value genI1Cast(PatternRewriter &r, Location loc, Value val) {
-  if (val.getType().isInteger(1))
-    return val;
-
-  assert(isa<IntegerType>(val.getType()) && "expected integer type");
+  assert(val.getType().isInteger(256) && "expected i256 type");
   auto zero =
       r.create<arith::ConstantOp>(loc, r.getIntegerAttr(val.getType(), 0));
   return r.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, val, zero);
@@ -173,21 +170,7 @@ struct CmpOpLowering : public OpRewritePattern<yul::CmpOp> {
     arith::CmpIPredicate predicate = getCmpPredicate(op.getPredicate());
     Value cmp = r.create<arith::CmpIOp>(op.getLoc(), predicate, op.getLhs(),
                                         op.getRhs());
-    if (op.getOut().getType().isInteger(1)) {
-      r.replaceOp(op, cmp);
-      return success();
-    }
     r.replaceOp(op, genI256Cast(r, op.getLoc(), cmp));
-    return success();
-  }
-};
-
-template <typename YulOp, typename ArithOp>
-struct CastOpLowering : public OpRewritePattern<YulOp> {
-  using OpRewritePattern<YulOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(YulOp op, PatternRewriter &r) const override {
-    r.replaceOpWithNewOp<ArithOp>(op, op.getOut().getType(), op.getInput());
     return success();
   }
 };
@@ -1563,10 +1546,7 @@ void evm::populateYulPats(RewritePatternSet &pats) {
            BinaryOpLowering<yul::ArithDivOp, arith::DivUIOp>,
            BinaryOpLowering<yul::ArithSDivOp, arith::DivSIOp>,
            BinaryOpLowering<yul::ArithModOp, arith::RemUIOp>,
-           BinaryOpLowering<yul::ArithSModOp, arith::RemSIOp>,
-           CastOpLowering<yul::ArithExtUIOp, arith::ExtUIOp>,
-           CastOpLowering<yul::ArithExtSIOp, arith::ExtSIOp>,
-           CastOpLowering<yul::ArithTruncIOp, arith::TruncIOp>>(
+           BinaryOpLowering<yul::ArithSModOp, arith::RemSIOp>>(
       pats.getContext());
   pats.add<
       // clang-format off

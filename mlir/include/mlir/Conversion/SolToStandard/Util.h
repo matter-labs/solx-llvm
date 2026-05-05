@@ -86,8 +86,7 @@ public:
 
   Value genCmp(yul::CmpPredicate predicate, Value lhs, Value rhs,
                std::optional<Location> locArg = std::nullopt) {
-    return b.create<yul::CmpOp>(locArg ? *locArg : defLoc,
-                                b.getIntegerType(256), predicate, lhs, rhs);
+    return b.create<yul::CmpOp>(locArg ? *locArg : defLoc, predicate, lhs, rhs);
   }
 
   yul::IfOp createIf(TypeRange resultTypes, Value cond,

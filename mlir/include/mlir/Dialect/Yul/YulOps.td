@@ -64,11 +64,9 @@ def Yul_FuncOp : Yul_Op<"func", [AutomaticAllocationScope,
 
 def Yul_FuncCallOp : Yul_Op<"func_call"> {
   let summary = "Represents a Yul function call";
-  // TODO #i256promote: Revert back to Variadic<I256> once Solidity boundary
-  // types are promoted before Sol-to-Yul.
   let arguments = (ins FlatSymbolRefAttr:$callee,
-                       Variadic<AnyType>:$operands);
-  let results = (outs Variadic<AnyType>:$outs);
+                       Variadic<I256>:$operands);
+  let results = (outs Variadic<I256>:$outs);
 
   let builders = [
     OpBuilder<(ins "FuncOp":$callee, CArg<"ValueRange", "{}">:$operands), [{
@@ -86,8 +84,7 @@ def Yul_FuncCallOp : Yul_Op<"func_call"> {
 
 def Yul_FuncReturnOp : Yul_Op<"func_return", [Pure, Terminator]> {
   let summary = "Represents a Yul function return";
-  // TODO #i256promote: Revert back to Variadic<I256> with Yul_FuncCallOp.
-  let arguments = (ins Variadic<AnyType>:$operands);
+  let arguments = (ins Variadic<I256>:$operands);
 
   let builders = [
     OpBuilder<(ins), [{
@@ -95,7 +92,7 @@ def Yul_FuncReturnOp : Yul_Op<"func_return", [Pure, Terminator]> {
     }]>,
   ];
 
-  let assemblyFormat = "attr-dict ($operands^ `:` type($operands))?";
+  let assemblyFormat = "attr-dict ($operands^)?";
 }
 
 def Yul_ConstantOp : Yul_Op<"constant", [
@@ -103,29 +100,17 @@ def Yul_ConstantOp : Yul_Op<"constant", [
   DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
 ]> {
   let summary = "Represents a Yul word constant";
-  // TODO #i256promote: Revert back to I256Attr -> I256 once Solidity
-  // boundary values are promoted before Sol-to-Yul. Non-i256 constants are a
-  // temporary Sol carrier bridge, not the final Yul word contract.
-  let arguments = (ins APIntAttr:$value);
-  let results = (outs AnySignlessInteger:$out);
+  let arguments = (ins I256Attr:$value);
+  let results = (outs I256:$out);
 
-  let builders = [
-    OpBuilder<(ins "IntegerAttr":$value), [{
-      $_state.addAttribute(getValueAttrName($_state.name), value);
-      $_state.addTypes(value.getType());
-    }]>
-  ];
-
-  let assemblyFormat = "$value attr-dict `:` type($out)";
+  let assemblyFormat = "$value attr-dict";
 }
 
-// TODO #i256promote: Revert the pure Yul value ops back to i256-only once
-// Sol-to-Yul promotes Solidity integer carriers before creating Yul ops.
 class Yul_BinOp<string mnemonic> :
     Yul_Op<mnemonic, [Pure, AllTypesMatch<["lhs", "rhs", "out"]>]> {
-  let arguments = (ins AnySignlessInteger:$lhs, AnySignlessInteger:$rhs);
-  let results = (outs AnySignlessInteger:$out);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($out)";
+  let arguments = (ins I256:$lhs, I256:$rhs);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
 
 def Yul_AddOp : Yul_BinOp<"add"> {
@@ -154,40 +139,25 @@ def Yul_XOrOp : Yul_BinOp<"xor"> {
 
 def Yul_NotOp : Yul_Op<"not", [Pure, AllTypesMatch<["value", "out"]>]> {
   let summary = "Represents the `not` call in yul";
-  // TODO #i256promote: Revert back to I256 -> I256 with Yul_BinOp.
-  let arguments = (ins AnySignlessInteger:$value);
-  let results = (outs AnySignlessInteger:$out);
-  let assemblyFormat = "$value attr-dict `:` type($out)";
+  let arguments = (ins I256:$value);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$value attr-dict";
 }
 
 def Yul_CmpOp : Yul_Op<"cmp", [Pure, AllTypesMatch<["lhs", "rhs"]>]> {
   let summary = "Represents a Yul word comparison";
-  // TODO #i256promote: Revert operands/results to i256-only once Solidity
-  // comparisons cross into Yul as word-valued 0/1 expressions. The temporary
-  // i1 result form exists only to preserve current Sol carrier behavior.
   let arguments = (ins Yul_CmpPredicateAttr:$predicate,
-                       AnySignlessInteger:$lhs, AnySignlessInteger:$rhs);
-  let results = (outs AnySignlessInteger:$out);
+                       I256:$lhs, I256:$rhs);
+  let results = (outs I256:$out);
 
-  let builders = [
-    OpBuilder<(ins "CmpPredicate":$predicate, "Value":$lhs, "Value":$rhs), [{
-      $_state.addOperands({lhs, rhs});
-      $_state.addAttribute(getPredicateAttrName($_state.name),
-                           CmpPredicateAttr::get($_builder.getContext(),
-                                                 predicate));
-      $_state.addTypes($_builder.getIntegerType(256));
-    }]>
-  ];
-
-  let assemblyFormat =
-      "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($out)";
+  let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict";
 }
 
 class Yul_ArithBinOp<string mnemonic> :
     Yul_Op<mnemonic, [Pure, AllTypesMatch<["lhs", "rhs", "out"]>]> {
-  let arguments = (ins AnySignlessInteger:$lhs, AnySignlessInteger:$rhs);
-  let results = (outs AnySignlessInteger:$out);
-  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($out)";
+  let arguments = (ins I256:$lhs, I256:$rhs);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
 
 def Yul_ArithShlOp : Yul_ArithBinOp<"arith_shl"> {
@@ -218,34 +188,13 @@ def Yul_ArithSModOp : Yul_ArithBinOp<"arith_smod"> {
   let summary = "UB-prone arithmetic wrapper for signed remainder; all inputs are i256";
 }
 
-// TODO #i256promote: Remove these.
-class Yul_ArithCastOp<string mnemonic> : Yul_Op<mnemonic, [Pure]> {
-  let arguments = (ins AnySignlessInteger:$input);
-  let results = (outs AnySignlessInteger:$out);
-  let assemblyFormat = "$input attr-dict `:` type($input) `to` type($out)";
-}
-
-def Yul_ArithExtUIOp : Yul_ArithCastOp<"arith_extui"> {
-  let summary = "Temporary Sol-carrier-preserving unsigned integer extension";
-}
-
-def Yul_ArithExtSIOp : Yul_ArithCastOp<"arith_extsi"> {
-  let summary = "Temporary Sol-carrier-preserving signed integer extension";
-}
-
-def Yul_ArithTruncIOp : Yul_ArithCastOp<"arith_trunci"> {
-  let summary = "Temporary Sol-carrier-preserving integer truncation";
-}
-
 def Yul_ArithSelectOp : Yul_Op<"arith_select", [Pure,
     AllTypesMatch<["trueValue", "falseValue", "out"]>]> {
   let summary = "Arithmetic wrapper for value selection; all inputs are i256";
-  // TODO #i256promote: Tighten this to I256 with the rest of the Yul word ops.
-  let arguments = (ins AnySignlessInteger:$condition, AnySignlessInteger:$trueValue,
-                       AnySignlessInteger:$falseValue);
-  let results = (outs AnySignlessInteger:$out);
+  let arguments = (ins I256:$condition, I256:$trueValue, I256:$falseValue);
+  let results = (outs I256:$out);
   let assemblyFormat =
-      "$condition `,` $trueValue `,` $falseValue attr-dict `:` type($condition) `,` type($out)";
+      "$condition `,` $trueValue `,` $falseValue attr-dict";
 }
 
 def Yul_BreakOp : Yul_Op<"break", [Terminator]> {
@@ -257,10 +206,7 @@ def Yul_ContinueOp : Yul_Op<"continue", [Terminator]> {
 }
 
 def Yul_ConditionOp : Yul_Op<"condition", [Terminator]> {
-  // TODO #i256promote: Revert to I256 once Sol-to-Yul promotes boolean
-  // conditions into Yul truthy word values.
-  let arguments = (ins AnySignlessInteger:$condition,
-                       Variadic<AnyType>:$args);
+  let arguments = (ins I256:$condition, Variadic<I256>:$args);
 
   let builders = [
     OpBuilder<(ins "Value":$condition, CArg<"ValueRange", "{}">:$args), [{
@@ -270,30 +216,27 @@ def Yul_ConditionOp : Yul_Op<"condition", [Terminator]> {
   ];
   let skipDefaultBuilders = 1;
 
-  let assemblyFormat =
-      "$condition (`,` $args^)? attr-dict `:` type($condition) (`,` type($args)^)?";
+  let assemblyFormat = "$condition (`,` $args^)? attr-dict";
 }
 
 def Yul_YieldOp : Yul_Op<"yield", [ReturnLike, Terminator,
   ParentOneOf<["IfOp", "SwitchOp", "WhileOp", "DoWhileOp", "ForOp"]>]
 > {
-  let arguments = (ins Variadic<AnyType>:$operands);
+  let arguments = (ins Variadic<I256>:$operands);
 
   let builders = [
     OpBuilder<(ins), [{ /* nothing to do */ }]>,
   ];
 
-  let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
+  let assemblyFormat = "($operands^)? attr-dict";
 }
 
 def Yul_IfOp : Yul_Op<"if",
   [AutomaticAllocationScope, NoRegionArguments,
    DeclareOpInterfaceMethods<RegionBranchOpInterface>]
 > {
-  // TODO #i256promote: Revert to I256 once Sol-to-Yul promotes boolean
-  // conditions into Yul truthy word values.
-  let arguments = (ins AnySignlessInteger:$cond);
-  let results = (outs Variadic<AnyType>:$results);
+  let arguments = (ins I256:$cond);
+  let results = (outs Variadic<I256>:$results);
   let regions = (region MinSizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
 
   let builders = [
@@ -305,7 +248,7 @@ def Yul_IfOp : Yul_Op<"if",
   ];
 
   let assemblyFormat =
-      "$cond `:` type($cond) (`->` type($results)^)? $thenRegion `else` $elseRegion attr-dict";
+      "$cond (`->` type($results)^)? $thenRegion `else` $elseRegion attr-dict";
 }
 
 def Yul_SwitchOp : Yul_Op<"switch", [
@@ -313,10 +256,8 @@ def Yul_SwitchOp : Yul_Op<"switch", [
   DeclareOpInterfaceMethods<RegionBranchOpInterface,
                             ["getRegionInvocationBounds"]>
 ]> {
-  // TODO #i256promote: Revert arg/cases to I256 once Sol-to-Yul promotes
-  // switch values into Yul word values.
-  let arguments = (ins AnySignlessInteger:$arg, AnyIntElementsAttr:$cases);
-  let results = (outs Variadic<AnyType>:$results);
+  let arguments = (ins I256:$arg, SignlessIntElementsAttr<256>:$cases);
+  let results = (outs Variadic<I256>:$results);
   let regions = (region MinSizedRegion<1>:$defaultRegion,
                         VariadicRegion<MinSizedRegion<1>>:$caseRegions);
 
@@ -329,12 +270,12 @@ class Yul_WhileOpBase<string mnemonic> : Yul_Op<mnemonic, [
 ]>;
 
 def Yul_WhileOp : Yul_WhileOpBase<"while"> {
-  let arguments = (ins Variadic<AnyType>:$inits);
-  let results = (outs Variadic<AnyType>:$results);
+  let arguments = (ins Variadic<I256>:$inits);
+  let results = (outs Variadic<I256>:$results);
   let regions = (region SizedRegion<1>:$cond, MinSizedRegion<1>:$body);
 
   let assemblyFormat =
-      "($inits^ `:` type($inits))? (`->` type($results)^)? $cond `do` $body attr-dict";
+      "($inits^)? (`->` type($results)^)? $cond `do` $body attr-dict";
 }
 
 def Yul_DoWhileOp : Yul_WhileOpBase<"do"> {
@@ -349,9 +290,9 @@ def Yul_DoWhileOp : Yul_WhileOpBase<"do"> {
 
 def Yul_ForOp : Yul_Op<"for", [Yul_LoopOpInterface,
                                AutomaticAllocationScope]> {
-  let arguments = (ins Variadic<AnyType>:$inits,
+  let arguments = (ins Variadic<I256>:$inits,
                        OptionalAttr<UnitAttr>:$full_unroll);
-  let results = (outs Variadic<AnyType>:$results);
+  let results = (outs Variadic<I256>:$results);
   let regions = (region SizedRegion<1>:$cond, MinSizedRegion<1>:$body,
                         SizedRegion<1>:$step);
 
@@ -369,7 +310,7 @@ def Yul_ForOp : Yul_Op<"for", [Yul_LoopOpInterface,
   ];
 
   let assemblyFormat = [{
-    ($inits^ `:` type($inits))? (`->` type($results)^)?
+    ($inits^)? (`->` type($results)^)?
     `cond` $cond
     `body` $body
     `step` $step

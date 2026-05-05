@@ -32,16 +32,13 @@ void ConstantOp::getAsmResultNames(
 LogicalResult FuncOp::verify() {
   auto fnTy = getFunctionType();
 
-  // TODO #i256promote: Revert back to i256-only Yul function
-  // inputs/results once Solidity boundary types are promoted before Sol-to-Yul.
-  //
-  // auto i256Ty = IntegerType::get(getContext(), 256);
-  // for (Type inputTy : fnTy.getInputs())
-  //   if (inputTy != i256Ty)
-  //     return emitOpError("expects all input types to be i256");
-  // for (Type resultTy : fnTy.getResults())
-  //   if (resultTy != i256Ty)
-  //     return emitOpError("expects all result types to be i256");
+  auto i256Ty = IntegerType::get(getContext(), 256);
+  for (Type inputTy : fnTy.getInputs())
+    if (inputTy != i256Ty)
+      return emitOpError("expects all input types to be i256");
+  for (Type resultTy : fnTy.getResults())
+    if (resultTy != i256Ty)
+      return emitOpError("expects all result types to be i256");
 
   if (!getBody().empty()) {
     Block &entryBlock = getBody().front();
@@ -49,14 +46,9 @@ LogicalResult FuncOp::verify() {
       return emitOpError("expects entry block argument count to match the "
                          "function type input count");
 
-    // TODO #i256promote: Revert back to this entry block check with the
-    // function type checks above.
-    //
-    // clang-format off
-    // for (BlockArgument arg : entryBlock.getArguments())
-    //   if (arg.getType() != i256Ty)
-    //     return emitOpError("expects all entry block argument types to be i256");
-    // clang-format on
+    for (BlockArgument arg : entryBlock.getArguments())
+      if (arg.getType() != i256Ty)
+        return emitOpError("expects all entry block argument types to be i256");
 
     for (auto [arg, inputTy] :
          llvm::zip(entryBlock.getArguments(), fnTy.getInputs()))
@@ -116,6 +108,8 @@ LogicalResult SwitchOp::verify() {
   auto caseElementTy = getCases().getType().getElementType();
   if (caseElementTy != getArg().getType())
     return emitOpError("expects case value type to match switch argument type");
+  if (!caseElementTy.isInteger(256))
+    return emitOpError("expects case value type to be i256");
 
   if (getCases().getNumElements() !=
       static_cast<int64_t>(getCaseRegions().size()))
@@ -193,15 +187,9 @@ void SwitchOp::print(OpAsmPrinter &p) {
 ParseResult SwitchOp::parse(OpAsmParser &p, OperationState &result) {
   OpAsmParser::UnresolvedOperand arg;
   IntegerType argTy;
-  if (succeeded(p.parseOperand(arg))) {
-    if (p.parseColon())
-      return failure();
-    if (p.parseType(argTy))
-      return failure();
-    if (p.resolveOperand(arg, argTy, result.operands))
-      return failure();
-  }
-  if (p.parseOptionalArrowTypeList(result.types))
+  if (p.parseOperand(arg) || p.parseColon() || p.parseType(argTy) ||
+      p.resolveOperand(arg, argTy, result.operands) ||
+      p.parseOptionalArrowTypeList(result.types))
     return failure();
 
   SmallVector<APInt> caseVals;
