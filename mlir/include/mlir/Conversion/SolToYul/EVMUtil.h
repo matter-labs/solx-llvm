@@ -296,14 +296,31 @@ public:
   /// Zeroes storage elements [\p startIdx, \p endIdx) of the storage array
   /// \p arrTy at \p arraySlot.  For a dynamic array, \p arraySlot is the
   /// length slot and the data area is keccak256(\p arraySlot).  For a static
-  /// array, \p arraySlot is also the base of the data area.  Dynamic
-  /// sub-arrays and strings are cleared recursively.
+  /// array, \p arraySlot is also the base of the data area.
   ///
-  /// Currently supports only arrays whose leaf element type is either
-  /// \c StringType or an integer that occupies a full 32-byte storage slot.
+  /// All Solidity storage element types are handled recursively:
+  ///  - Scalars and fixed-size arrays of scalars: all occupied slots zeroed
+  ///    directly.
+  ///  - Packed types (elemsPerSlot >= 2, e.g. bool, uint8): partial-slot
+  ///    masking is applied at the low boundary when \p startIdx does not fall
+  ///    on a slot boundary.
+  ///  - Strings/bytes: out-of-place data area cleared, then the length slot
+  ///    zeroed.
+  ///  - Dynamic sub-arrays: length slot zeroed, data area cleared recursively.
+  ///  - Fixed-size arrays with dynamically-sized element types: each element
+  ///    cleared recursively.
+  ///  - Structs: each member cleared recursively; packed members sharing a
+  ///    storage slot are deduplicated.
+  ///
+  /// Set \p isDecrement when the caller is popping exactly one element, i.e.
+  /// \p endIdx == \p startIdx + 1.  Two optimisations are applied:
+  ///  1. The range-guard branch (\p startIdx < \p endIdx) is omitted.
+  ///  2. For non-packed element types the loop is unrolled into
+  ///     \c getStorageSlotCount(eltTy) direct stores (a compile-time constant).
   void
   genClearStorageArrayTail(mlir::Value arraySlot, mlir::sol::ArrayType arrTy,
                            mlir::Value startIdx, mlir::Value endIdx,
+                           bool isDecrement = false,
                            std::optional<mlir::Location> locArg = std::nullopt);
 
   /// Copies a string from \p src (any data location encoded in \p ty) to the

@@ -20,6 +20,8 @@
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
+#include "llvm/ADT/SmallSet.h"
+#include <functional>
 
 using namespace mlir;
 
@@ -1830,38 +1832,130 @@ Value evm::Builder::genStorageArraySlotCount(Value len, Type eltTy,
 void evm::Builder::genClearStorageArrayTail(Value arraySlot,
                                             sol::ArrayType arrTy,
                                             Value startIdx, Value endIdx,
+                                            bool isDecrement,
                                             std::optional<Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
   Type eltTy = arrTy.getEltType();
-  // For dynamic arrays the data lives at keccak256(arraySlot); for static
-  // arrays it lives directly at arraySlot.
-  Value dataStart =
-      arrTy.isDynSized()
-          ? genDataAddrPtr(arraySlot, sol::DataLocation::Storage, loc)
-          : arraySlot;
+  // Multiple elements share one slot when byteSize <= 16 (elemsPerSlot >= 2).
+  bool trulyPacked =
+      sol::canBePacked(eltTy) && sol::getStorageByteSize(eltTy) <= 16;
 
-  Value needsClear = bExt.genCmp(yul::CmpPredicate::ult, startIdx, endIdx);
-  auto ifClear = bExt.createIf(needsClear);
-  b.setInsertionPointToStart(&ifClear.getThenRegion().front());
+  yul::IfOp ifClear = nullptr;
+  if (!isDecrement) {
+    Value needsClear = bExt.genCmp(yul::CmpPredicate::ult, startIdx, endIdx);
+    ifClear = bExt.createIf(needsClear, /*withElseRegion=*/false);
+    b.setInsertionPointToStart(&ifClear.getThenRegion().front());
+  }
   {
+    // For dynamic arrays the data lives at keccak256(arraySlot). For static
+    // arrays it lives directly at arraySlot. Computed here (inside the guard)
+    // so the hash is only emitted when the range is known non-empty.
+    Value dataStart =
+        arrTy.isDynSized()
+            ? genDataAddrPtr(arraySlot, sol::DataLocation::Storage, loc)
+            : arraySlot;
     Value deleteStart = b.create<yul::AddOp>(
         loc, dataStart, genStorageArraySlotCount(startIdx, eltTy, loc));
 
+    // Zeros all storage slots occupied by a value of type \p ty at \p slot.
+    // Used as the leaf operation in genClearStorageValue for scalars, packed
+    // types, and fixed-size arrays with trivially-zeroable elements.
+    auto genZeroStorageSlots = [&](Type ty, Value slot) {
+      unsigned slotCount = sol::getStorageSlotCount(ty);
+      for (unsigned i = 0; i < slotCount; ++i) {
+        Value slotAddr = b.create<yul::AddOp>(loc, slot, bExt.genI256Const(i));
+        b.create<yul::SStoreOp>(loc, slotAddr, bExt.genI256Const(0, loc));
+      }
+    };
+
+    // Recursively clears the storage occupied by a value of type \p ty rooted
+    // at \p slot. Handles all storage types:
+    //   - dynamic arrays: zero the length slot then clear the data area
+    //   - strings/bytes:  clear out-of-place data then zero the length slot
+    //   - structs:        recurse into each member (handles arbitrary nesting)
+    //   - scalars/fixed:  zero each occupied storage slot directly
+    std::function<void(Type, Value)> genClearStorageValue = [&](Type ty,
+                                                                Value slot) {
+      if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
+        if (arrTy.isDynSized()) {
+          Value oldLen = genLoad(slot, sol::DataLocation::Storage, loc);
+          genStore(bExt.genI256Const(0, loc), slot, sol::DataLocation::Storage,
+                   loc);
+          genClearStorageArrayTail(slot, arrTy, bExt.genI256Const(0, loc),
+                                   oldLen,
+                                   /*isDecrement=*/false, loc);
+        } else if (sol::hasDynamicallySizedElt(arrTy.getEltType())) {
+          // Fixed-size array with complex element type (dyn array, string,
+          // struct): iterate each element and recurse.
+          Type eltTy = arrTy.getEltType();
+          unsigned size = arrTy.getSize();
+          unsigned slotsPerElt = sol::getStorageSlotCount(eltTy);
+          for (unsigned i = 0; i < size; ++i) {
+            Value eltSlot = b.create<yul::AddOp>(
+                loc, slot, bExt.genI256Const(i * slotsPerElt));
+            genClearStorageValue(eltTy, eltSlot);
+          }
+        } else {
+          // Scalar/packed fixed-size array (e.g. uint72[2]).
+          genZeroStorageSlots(ty, slot);
+        }
+        return;
+      }
+
+      if (isa<sol::StringType>(ty)) {
+        Value zero = bExt.genI256Const(0, loc);
+        Value strOldLen = genStorageStringLength(
+            genLoad(slot, sol::DataLocation::Storage, loc), loc);
+        genClearStringStorageTail(slot, strOldLen, zero, loc);
+        b.create<yul::SStoreOp>(loc, slot, zero);
+        return;
+      }
+
+      if (auto structTy = dyn_cast<sol::StructType>(ty)) {
+        // Track slot offsets that have already been cleared. Multiple packed
+        // members (e.g. uint8 + bool) may share the same storage slot. A
+        // single sstore(0) is sufficient for those to skip duplicates.
+        // Members with dynamically-sized elements are never deduplicated; they
+        // always get their own recursive call regardless of slot sharing.
+        llvm::SmallSet<uint64_t, 8> clearedSlots;
+        for (unsigned m = 0; m < structTy.getMemberTypes().size(); ++m) {
+          Type memberTy = structTy.getMemberTypes()[m];
+          auto [slotOff, byteOff] = structTy.getStorageMemberOffset(m);
+          (void)byteOff;
+          if (!sol::hasDynamicallySizedElt(memberTy) &&
+              !clearedSlots.insert(slotOff).second)
+            continue;
+
+          Value memberSlot =
+              b.create<yul::AddOp>(loc, slot, bExt.genI256Const(slotOff));
+          genClearStorageValue(memberTy, memberSlot);
+        }
+        return;
+      }
+
+      // Scalar, packed fixed-size array, or non-deep fixed-size array.
+      genZeroStorageSlots(ty, slot);
+    };
+
     // Packed-type partial clear: when startIdx falls in the middle of a slot
     // (i.e. startIdx % elemsPerSlot != 0), the slot at (deleteStart−1) is only
-    // partially occupied by still-valid elements.  The upper bytes belonging to
+    // partially occupied by still-valid elements. The upper bytes belonging to
     // the removed elements must be zeroed while the lower bytes are preserved.
-    // This mirrors the YUL helper partial_clear_storage_slot.
-    if (sol::canBePacked(eltTy) && sol::getStorageByteSize(eltTy) <= 16) {
+    if (trulyPacked) {
       unsigned byteSize = sol::getStorageByteSize(eltTy);
       unsigned elemsPerSlot = 32 / byteSize;
       Value remainder = b.create<yul::ArithModOp>(
           loc, startIdx, bExt.genI256Const(elemsPerSlot));
       Value hasRemainder =
           bExt.genCmp(yul::CmpPredicate::ne, remainder, bExt.genI256Const(0));
-      auto ifPartial = bExt.createIf(hasRemainder);
+      // For isDecrement, the else branch handles the case where the popped
+      // element is the sole occupant of its slot and the whole slot must be
+      // zeroed. No loop is needed: a pop removes exactly one element, so at
+      // most one full slot can become empty.
+      auto ifPartial = bExt.createIf(hasRemainder,
+                                     /*withElseRegion=*/isDecrement, loc);
       {
         OpBuilder::InsertionGuard guard(b);
         b.setInsertionPointToStart(&ifPartial.getThenRegion().front());
@@ -1881,41 +1975,48 @@ void evm::Builder::genClearStorageArrayTail(Value arraySlot,
         genStore(b.create<yul::AndOp>(loc, slotVal, mask), partialSlot,
                  sol::DataLocation::Storage, loc);
       }
+      if (isDecrement) {
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPointToStart(&ifPartial.getElseRegion().front());
+        genClearStorageValue(eltTy, deleteStart);
+      }
     }
 
-    Value deleteEnd = b.create<yul::AddOp>(
-        loc, dataStart, genStorageArraySlotCount(endIdx, eltTy, loc));
-    Value numSlots = b.create<yul::SubOp>(loc, deleteEnd, deleteStart);
-
-    bExt.createCountedLoop(
-        bExt.genI256Const(0), numSlots, bExt.genI256Const(1), ValueRange{},
-        [&](OpBuilder &b, Location loc, Value i, ValueRange) {
-          Value slot = b.create<yul::AddOp>(loc, deleteStart, i);
-          if (auto innerArrTy = dyn_cast<sol::ArrayType>(eltTy);
-              innerArrTy && innerArrTy.isDynSized()) {
-            // Dynamic sub-array: read old length, zero the length slot, then
-            // recursively clear the data area without a panic check (newIdx=0).
-            Value oldLen = genLoad(slot, sol::DataLocation::Storage, loc);
-            genStore(bExt.genI256Const(0, loc), slot,
-                     sol::DataLocation::Storage, loc);
-            genClearStorageArrayTail(slot, innerArrTy,
-                                     bExt.genI256Const(0, loc), oldLen, loc);
-          } else if (isa<sol::StringType>(eltTy)) {
-            // string/bytes: clear out-of-place data slots first, then zero
-            // the length slot itself.
-            Value zero = bExt.genI256Const(0, loc);
-            Value strOldLen = genStorageStringLength(
-                genLoad(slot, sol::DataLocation::Storage, loc), loc);
-            genClearStringStorageTail(slot, strOldLen, zero, loc);
-            b.create<yul::SStoreOp>(loc, slot, zero);
-          } else {
-            // Scalar, packed, or fixed-size element: zero the slot directly.
-            b.create<yul::SStoreOp>(loc, slot, bExt.genI256Const(0, loc));
-          }
-          return SmallVector<Value>{};
-        });
+    if (isDecrement) {
+      if (!trulyPacked) {
+        // Pop of exactly one element: genClearStorageValue handles all slots of
+        // the element (including struct members, nested arrays, etc.) from the
+        // base slot, so a single call is sufficient.
+        genClearStorageValue(eltTy, deleteStart);
+      }
+      // trulyPacked: fully handled by the ifPartial block above.
+    } else {
+      Value deleteEnd = b.create<yul::AddOp>(
+          loc, dataStart, genStorageArraySlotCount(endIdx, eltTy, loc));
+      Value numSlots = b.create<yul::SubOp>(loc, deleteEnd, deleteStart);
+      // For non-packed types getStorageSlotCount(eltTy) >= 1 and slotStep
+      // equals the element's full slot footprint, so each iteration clears one
+      // complete element.
+      // For truly-packed types (multiple elements per slot) slotStep == 1 and
+      // the loop iterates slot-by-slot; genClearStorageValue zeroes the whole
+      // slot. The partial boundary slot at (deleteStart - 1) was already
+      // handled by the ifPartial block above.
+      unsigned slotStep = sol::getStorageSlotCount(eltTy);
+      bExt.createCountedLoop(
+          /*lowerBound=*/bExt.genI256Const(0),
+          /*upperBound=*/numSlots,
+          /*step=*/bExt.genI256Const(slotStep),
+          /*initArgs=*/ValueRange{},
+          [&](OpBuilder &b, Location loc, Value i, ValueRange) {
+            Value slot = b.create<yul::AddOp>(loc, deleteStart, i);
+            genClearStorageValue(eltTy, slot);
+            return SmallVector<Value>{};
+          },
+          /*fullUnroll*/ false, loc);
+    }
   }
-  b.setInsertionPointAfter(ifClear);
+  if (ifClear)
+    b.setInsertionPointAfter(ifClear);
 }
 
 void evm::Builder::genResizeDynStorageArray(Value arraySlot, Value newLen,
@@ -1939,7 +2040,8 @@ void evm::Builder::genResizeDynStorageArray(Value arraySlot, Value newLen,
   // Zero out storage slots that fall outside the new range.
   auto dynArrTy = sol::ArrayType::get(b.getContext(), /*size=*/-1, eltTy,
                                       sol::DataLocation::Storage);
-  genClearStorageArrayTail(arraySlot, dynArrTy, newLen, oldLen, loc);
+  genClearStorageArrayTail(arraySlot, dynArrTy, newLen, oldLen,
+                           /*isDecrement=*/false, loc);
 }
 
 Value evm::Builder::genCopyStringDataToMemory(Value src, Type ty,
@@ -2351,7 +2453,8 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
       if (dstIsStorage && srcArrTy.getSize() < dstArrTy.getSize()) {
         genClearStorageArrayTail(dstAddr, dstArrTy,
                                  bExt.genI256Const(srcArrTy.getSize()),
-                                 bExt.genI256Const(dstArrTy.getSize()), loc);
+                                 bExt.genI256Const(dstArrTy.getSize()),
+                                 /*isDecrement=*/false, loc);
       }
     }
 
