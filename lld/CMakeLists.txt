@@ -212,6 +212,9 @@ add_custom_target(lld-headers)
 set_target_properties(lld-headers PROPERTIES FOLDER "Misc")
 if (NOT LLVM_INSTALL_TOOLCHAIN_ONLY)
   install(DIRECTORY include/lld
+    # EVM local begin
+    include/lld-c
+    # EVM local end
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
     COMPONENT lld-headers
     FILES_MATCHING
