@@ -30,6 +30,10 @@ def Yul_Dialect : Dialect {
 
 def I256 : I<256>;
 
+def I256OrI256LLVMStruct : Type<
+  CPred<"::mlir::yul::isI256OrI256LLVMStruct($_self)">,
+  "i256 or LLVM struct type containing only i256 elements">;
+
 //===----------------------------------------------------------------------===//
 // Attributes
 //===----------------------------------------------------------------------===//

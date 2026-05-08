@@ -65,8 +65,8 @@ def Yul_FuncOp : Yul_Op<"func", [AutomaticAllocationScope,
 def Yul_FuncCallOp : Yul_Op<"func_call"> {
   let summary = "Represents a Yul function call";
   let arguments = (ins FlatSymbolRefAttr:$callee,
-                       Variadic<I256>:$operands);
-  let results = (outs Variadic<I256>:$outs);
+                       Variadic<I256OrI256LLVMStruct>:$operands);
+  let results = (outs Variadic<I256OrI256LLVMStruct>:$outs);
 
   let builders = [
     OpBuilder<(ins "FuncOp":$callee, CArg<"ValueRange", "{}">:$operands), [{
@@ -84,7 +84,7 @@ def Yul_FuncCallOp : Yul_Op<"func_call"> {
 
 def Yul_FuncReturnOp : Yul_Op<"func_return", [Pure, Terminator]> {
   let summary = "Represents a Yul function return";
-  let arguments = (ins Variadic<I256>:$operands);
+  let arguments = (ins Variadic<I256OrI256LLVMStruct>:$operands);
 
   let builders = [
     OpBuilder<(ins), [{
@@ -92,7 +92,7 @@ def Yul_FuncReturnOp : Yul_Op<"func_return", [Pure, Terminator]> {
     }]>,
   ];
 
-  let assemblyFormat = "attr-dict ($operands^)?";
+  let assemblyFormat = "attr-dict ($operands^ `:` type($operands))?";
 }
 
 def Yul_ConstantOp : Yul_Op<"constant", [
@@ -206,7 +206,7 @@ def Yul_ContinueOp : Yul_Op<"continue", [Terminator]> {
 }
 
 def Yul_ConditionOp : Yul_Op<"condition", [Terminator]> {
-  let arguments = (ins I256:$condition, Variadic<I256>:$args);
+  let arguments = (ins I256:$condition, Variadic<I256OrI256LLVMStruct>:$args);
 
   let builders = [
     OpBuilder<(ins "Value":$condition, CArg<"ValueRange", "{}">:$args), [{
@@ -216,19 +216,19 @@ def Yul_ConditionOp : Yul_Op<"condition", [Terminator]> {
   ];
   let skipDefaultBuilders = 1;
 
-  let assemblyFormat = "$condition (`,` $args^)? attr-dict";
+  let assemblyFormat = "$condition (`,` $args^ `:` type($args))? attr-dict";
 }
 
 def Yul_YieldOp : Yul_Op<"yield", [ReturnLike, Terminator,
   ParentOneOf<["IfOp", "SwitchOp", "WhileOp", "DoWhileOp", "ForOp"]>]
 > {
-  let arguments = (ins Variadic<I256>:$operands);
+  let arguments = (ins Variadic<I256OrI256LLVMStruct>:$operands);
 
   let builders = [
     OpBuilder<(ins), [{ /* nothing to do */ }]>,
   ];
 
-  let assemblyFormat = "($operands^)? attr-dict";
+  let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 }
 
 def Yul_IfOp : Yul_Op<"if",
@@ -236,7 +236,7 @@ def Yul_IfOp : Yul_Op<"if",
    DeclareOpInterfaceMethods<RegionBranchOpInterface>]
 > {
   let arguments = (ins I256:$cond);
-  let results = (outs Variadic<I256>:$results);
+  let results = (outs Variadic<I256OrI256LLVMStruct>:$results);
   let regions = (region MinSizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
 
   let builders = [
@@ -257,7 +257,7 @@ def Yul_SwitchOp : Yul_Op<"switch", [
                             ["getRegionInvocationBounds"]>
 ]> {
   let arguments = (ins I256:$arg, SignlessIntElementsAttr<256>:$cases);
-  let results = (outs Variadic<I256>:$results);
+  let results = (outs Variadic<I256OrI256LLVMStruct>:$results);
   let regions = (region MinSizedRegion<1>:$defaultRegion,
                         VariadicRegion<MinSizedRegion<1>>:$caseRegions);
 
@@ -270,12 +270,12 @@ class Yul_WhileOpBase<string mnemonic> : Yul_Op<mnemonic, [
 ]>;
 
 def Yul_WhileOp : Yul_WhileOpBase<"while"> {
-  let arguments = (ins Variadic<I256>:$inits);
-  let results = (outs Variadic<I256>:$results);
+  let arguments = (ins Variadic<I256OrI256LLVMStruct>:$initArgs);
+  let results = (outs Variadic<I256OrI256LLVMStruct>:$results);
   let regions = (region SizedRegion<1>:$cond, MinSizedRegion<1>:$body);
 
   let assemblyFormat =
-      "($inits^)? (`->` type($results)^)? $cond `do` $body attr-dict";
+      "($initArgs^ `:` type($initArgs))? (`->` type($results)^)? $cond `do` $body attr-dict";
 }
 
 def Yul_DoWhileOp : Yul_WhileOpBase<"do"> {
@@ -290,9 +290,9 @@ def Yul_DoWhileOp : Yul_WhileOpBase<"do"> {
 
 def Yul_ForOp : Yul_Op<"for", [Yul_LoopOpInterface,
                                AutomaticAllocationScope]> {
-  let arguments = (ins Variadic<I256>:$inits,
+  let arguments = (ins Variadic<I256OrI256LLVMStruct>:$initArgs,
                        OptionalAttr<UnitAttr>:$full_unroll);
-  let results = (outs Variadic<I256>:$results);
+  let results = (outs Variadic<I256OrI256LLVMStruct>:$results);
   let regions = (region SizedRegion<1>:$cond, MinSizedRegion<1>:$body,
                         SizedRegion<1>:$step);
 
@@ -310,7 +310,7 @@ def Yul_ForOp : Yul_Op<"for", [Yul_LoopOpInterface,
   ];
 
   let assemblyFormat = [{
-    ($inits^)? (`->` type($results)^)?
+    ($initArgs^ `:` type($initArgs))? (`->` type($results)^)?
     `cond` $cond
     `body` $body
     `step` $step

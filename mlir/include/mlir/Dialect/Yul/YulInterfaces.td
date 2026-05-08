@@ -17,8 +17,11 @@ include "mlir/Interfaces/LoopLikeInterface.td"
 //
 // Loops in Yul are C-style loops.
 def Yul_LoopOpInterface : OpInterface<"LoopOpInterface", [
-  DeclareOpInterfaceMethods<RegionBranchOpInterface>,
-  DeclareOpInterfaceMethods<LoopLikeOpInterface>
+  DeclareOpInterfaceMethods<RegionBranchOpInterface,
+                            ["getEntrySuccessorOperands"]>,
+  DeclareOpInterfaceMethods<LoopLikeOpInterface,
+                            ["getInitsMutable", "getRegionIterArgs",
+                             "getYieldedValuesMutable", "getLoopResults"]>
 ]> {
   let cppNamespace = "::mlir::yul";
 

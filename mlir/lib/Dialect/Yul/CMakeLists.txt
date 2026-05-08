@@ -11,6 +11,7 @@ add_mlir_dialect_library(MLIRYulDialect
   MLIRYulInterfacesIncGen
 
   LINK_LIBS PUBLIC
+  MLIRLLVMDialect
   )
 
 add_subdirectory(Transforms)

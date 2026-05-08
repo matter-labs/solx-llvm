@@ -27,6 +27,10 @@
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+namespace mlir::yul {
+bool isI256OrI256LLVMStruct(Type type);
+} // namespace mlir::yul
+
 #include "mlir/Dialect/Yul/YulInterfaces.h.inc"
 #include "mlir/Dialect/Yul/YulOpsDialect.h.inc"
 #include "mlir/Dialect/Yul/YulOpsEnums.h.inc"

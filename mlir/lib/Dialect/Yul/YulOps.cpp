@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Yul/Yul.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/OpImplementation.h"
@@ -20,6 +21,19 @@
 
 using namespace mlir;
 using namespace mlir::yul;
+
+bool mlir::yul::isI256OrI256LLVMStruct(Type type) {
+  if (type.isSignlessInteger(256))
+    return true;
+
+  auto structTy = dyn_cast<LLVM::LLVMStructType>(type);
+  if (!structTy || structTy.isOpaque())
+    return false;
+
+  return llvm::all_of(structTy.getBody(), [](Type elementTy) {
+    return elementTy.isSignlessInteger(256);
+  });
+}
 
 void ConstantOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
@@ -32,13 +46,16 @@ void ConstantOp::getAsmResultNames(
 LogicalResult FuncOp::verify() {
   auto fnTy = getFunctionType();
 
-  auto i256Ty = IntegerType::get(getContext(), 256);
   for (Type inputTy : fnTy.getInputs())
-    if (inputTy != i256Ty)
-      return emitOpError("expects all input types to be i256");
+    if (!isI256OrI256LLVMStruct(inputTy))
+      return emitOpError(
+          "expects all input types to be i256 or LLVM structs containing only "
+          "i256 elements");
   for (Type resultTy : fnTy.getResults())
-    if (resultTy != i256Ty)
-      return emitOpError("expects all result types to be i256");
+    if (!isI256OrI256LLVMStruct(resultTy))
+      return emitOpError(
+          "expects all result types to be i256 or LLVM structs containing only "
+          "i256 elements");
 
   if (!getBody().empty()) {
     Block &entryBlock = getBody().front();
@@ -47,8 +64,9 @@ LogicalResult FuncOp::verify() {
                          "function type input count");
 
     for (BlockArgument arg : entryBlock.getArguments())
-      if (arg.getType() != i256Ty)
-        return emitOpError("expects all entry block argument types to be i256");
+      if (!isI256OrI256LLVMStruct(arg.getType()))
+        return emitOpError("expects all entry block argument types to be i256 "
+                           "or LLVM structs containing only i256 elements");
 
     for (auto [arg, inputTy] :
          llvm::zip(entryBlock.getArguments(), fnTy.getInputs()))
@@ -145,12 +163,65 @@ void LoopOpInterface::getLoopOpSuccessorRegions(
   }
 }
 
+void ForOp::getSuccessorRegions(RegionBranchPoint point,
+                                SmallVectorImpl<RegionSuccessor> &regions) {
+  LoopOpInterface::getLoopOpSuccessorRegions(*this, point, regions);
+}
+
+SmallVector<Region *> ForOp::getLoopRegions() { return {&getBody()}; }
+
+OperandRange ForOp::getEntrySuccessorOperands(RegionBranchPoint point) {
+  assert(point == getCond() &&
+         "yul.for entry successor is expected to be the condition region");
+  return getInitArgs();
+}
+
+MutableArrayRef<OpOperand> ForOp::getInitsMutable() {
+  return (*this)->getOpOperands();
+}
+
+Block::BlockArgListType ForOp::getRegionIterArgs() {
+  return getCond().front().getArguments();
+}
+
+std::optional<MutableArrayRef<OpOperand>> ForOp::getYieldedValuesMutable() {
+  auto yieldOp = dyn_cast<YieldOp>(getStep().front().getTerminator());
+  if (!yieldOp)
+    return std::nullopt;
+  return yieldOp.getOperandsMutable();
+}
+
+std::optional<ResultRange> ForOp::getLoopResults() { return getResults(); }
+
 void WhileOp::getSuccessorRegions(RegionBranchPoint point,
                                   SmallVectorImpl<RegionSuccessor> &regions) {
   LoopOpInterface::getLoopOpSuccessorRegions(*this, point, regions);
 }
 
 SmallVector<Region *> WhileOp::getLoopRegions() { return {&getBody()}; }
+
+OperandRange WhileOp::getEntrySuccessorOperands(RegionBranchPoint point) {
+  assert(point == getCond() &&
+         "yul.while entry successor is expected to be the condition region");
+  return getInitArgs();
+}
+
+MutableArrayRef<OpOperand> WhileOp::getInitsMutable() {
+  return (*this)->getOpOperands();
+}
+
+Block::BlockArgListType WhileOp::getRegionIterArgs() {
+  return getCond().front().getArguments();
+}
+
+std::optional<MutableArrayRef<OpOperand>> WhileOp::getYieldedValuesMutable() {
+  auto yieldOp = dyn_cast<YieldOp>(getBody().front().getTerminator());
+  if (!yieldOp)
+    return std::nullopt;
+  return yieldOp.getOperandsMutable();
+}
+
+std::optional<ResultRange> WhileOp::getLoopResults() { return getResults(); }
 
 void DoWhileOp::getSuccessorRegions(RegionBranchPoint point,
                                     SmallVectorImpl<RegionSuccessor> &regions) {
@@ -159,12 +230,29 @@ void DoWhileOp::getSuccessorRegions(RegionBranchPoint point,
 
 SmallVector<Region *> DoWhileOp::getLoopRegions() { return {&getBody()}; }
 
-void ForOp::getSuccessorRegions(RegionBranchPoint point,
-                                SmallVectorImpl<RegionSuccessor> &regions) {
-  LoopOpInterface::getLoopOpSuccessorRegions(*this, point, regions);
+OperandRange DoWhileOp::getEntrySuccessorOperands(RegionBranchPoint point) {
+  assert(point == getBody() &&
+         "yul.do entry successor is expected to be the body region");
+  auto operandEnd = (*this)->operand_end();
+  return OperandRange(operandEnd, operandEnd);
 }
 
-SmallVector<Region *> ForOp::getLoopRegions() { return {&getBody()}; }
+MutableArrayRef<OpOperand> DoWhileOp::getInitsMutable() { return {}; }
+
+Block::BlockArgListType DoWhileOp::getRegionIterArgs() {
+  return Block::BlockArgListType();
+}
+
+std::optional<MutableArrayRef<OpOperand>> DoWhileOp::getYieldedValuesMutable() {
+  auto yieldOp = dyn_cast<YieldOp>(getBody().front().getTerminator());
+  if (!yieldOp)
+    return std::nullopt;
+  return yieldOp.getOperandsMutable();
+}
+
+std::optional<ResultRange> DoWhileOp::getLoopResults() {
+  return (*this)->getResults();
+}
 
 void SwitchOp::print(OpAsmPrinter &p) {
   p << ' ' << getArg() << " : " << getArg().getType();
