@@ -14,9 +14,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Conversion/SolToStandard/EVMUtil.h"
-#include "mlir/Conversion/SolToStandard/EVMConstants.h"
-#include "mlir/Conversion/SolToStandard/Util.h"
+#include "mlir/Conversion/SolToYul/EVMUtil.h"
+#include "mlir/Conversion/SolToYul/EVMConstants.h"
+#include "mlir/Conversion/SolToYul/Util.h"
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"

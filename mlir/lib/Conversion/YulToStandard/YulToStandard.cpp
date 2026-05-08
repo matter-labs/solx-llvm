@@ -10,9 +10,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Conversion/SolToStandard/YulToStandard.h"
-#include "mlir/Conversion/SolToStandard/EVMUtil.h"
-#include "mlir/Conversion/SolToStandard/Util.h"
+#include "mlir/Conversion/YulToStandard/YulToStandard.h"
+#include "mlir/Conversion/SolToYul/EVMUtil.h"
+#include "mlir/Conversion/SolToYul/Util.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

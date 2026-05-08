@@ -10,8 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MLIR_CONVERSION_SOLTOSTANDARD_EVMCONSTANTS_H
-#define MLIR_CONVERSION_SOLTOSTANDARD_EVMCONSTANTS_H
+#ifndef MLIR_CONVERSION_SOLTOYUL_EVMCONSTANTS_H
+#define MLIR_CONVERSION_SOLTOYUL_EVMCONSTANTS_H
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/StringRef.h"
@@ -83,4 +83,4 @@ inline llvm::APInt keccak256AsAPInt(llvm::StringRef input) {
 } // namespace evm
 } // namespace mlir
 
-#endif // MLIR_CONVERSION_SOLTOSTANDARD_EVMCONSTANTS_H
+#endif // MLIR_CONVERSION_SOLTOYUL_EVMCONSTANTS_H

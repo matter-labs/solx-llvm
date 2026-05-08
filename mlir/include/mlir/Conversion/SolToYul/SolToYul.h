@@ -6,17 +6,23 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares EVM-specific lowering patterns for the Sol dialect.
+// This file declares the Sol-to-Yul conversion pass and its EVM-specific
+// lowering patterns.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MLIR_CONVERSION_SOLTOSTANDARD_SOLTOYUL_H
-#define MLIR_CONVERSION_SOLTOSTANDARD_SOLTOYUL_H
+#ifndef MLIR_CONVERSION_SOLTOYUL_SOLTOYUL_H
+#define MLIR_CONVERSION_SOLTOYUL_SOLTOYUL_H
 
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir {
+
+#define GEN_PASS_DECL_CONVERTSOLTOYULPASS
+#include "mlir/Conversion/Passes.h.inc"
+
 namespace evm {
 
 class SolTypeConverter : public TypeConverter {
@@ -78,4 +84,4 @@ void populateStage2Pats(RewritePatternSet &pats, TypeConverter &tyConv);
 } // namespace evm
 } // namespace mlir
 
-#endif // MLIR_CONVERSION_SOLTOSTANDARD_SOLTOYUL_H
+#endif // MLIR_CONVERSION_SOLTOYUL_SOLTOYUL_H

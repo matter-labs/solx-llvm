@@ -6,16 +6,22 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares EVM-specific lowering patterns for the Yul dialect.
+// This file declares the Yul-to-standard conversion pass and its EVM-specific
+// lowering patterns.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MLIR_CONVERSION_SOLTOSTANDARD_YULTOSTANDARD_H
-#define MLIR_CONVERSION_SOLTOSTANDARD_YULTOSTANDARD_H
+#ifndef MLIR_CONVERSION_YULTOSTANDARD_YULTOSTANDARD_H
+#define MLIR_CONVERSION_YULTOSTANDARD_YULTOSTANDARD_H
 
+#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir {
+
+#define GEN_PASS_DECL_CONVERTYULTOSTANDARDPASS
+#include "mlir/Conversion/Passes.h.inc"
+
 namespace evm {
 
 /// Adds the conversion patterns of yul ops in the sol dialect.
@@ -24,4 +30,4 @@ void populateYulPats(RewritePatternSet &pats);
 } // namespace evm
 } // namespace mlir
 
-#endif // MLIR_CONVERSION_SOLTOSTANDARD_YULTOSTANDARD_H
+#endif // MLIR_CONVERSION_YULTOSTANDARD_YULTOSTANDARD_H

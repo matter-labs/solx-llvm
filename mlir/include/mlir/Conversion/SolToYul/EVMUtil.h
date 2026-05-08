@@ -10,10 +10,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MLIR_CONVERSION_SOLTOSTANDARD_EVMUTIL_H
-#define MLIR_CONVERSION_SOLTOSTANDARD_EVMUTIL_H
+#ifndef MLIR_CONVERSION_SOLTOYUL_EVMUTIL_H
+#define MLIR_CONVERSION_SOLTOYUL_EVMUTIL_H
 
-#include "mlir/Conversion/SolToStandard/EVMConstants.h"
+#include "mlir/Conversion/SolToYul/EVMConstants.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/APInt.h"
@@ -427,4 +427,4 @@ public:
 } // namespace evm
 } // namespace mlir
 
-#endif // MLIR_CONVERSION_SOLTOSTANDARD_EVMUTIL_H
+#endif // MLIR_CONVERSION_SOLTOYUL_EVMUTIL_H

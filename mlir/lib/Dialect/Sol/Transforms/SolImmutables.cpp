@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Sol/Transforms/SolImmutables.h"
-#include "mlir/Conversion/SolToStandard/EVMUtil.h"
+#include "mlir/Conversion/SolToYul/EVMUtil.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"

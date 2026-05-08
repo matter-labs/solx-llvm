@@ -10,7 +10,7 @@ add_mlir_dialect_library(MLIRSolTransforms
   MLIRSolPassIncGen
 
   LINK_LIBS PUBLIC
-  MLIRSolToStandard
+  MLIRSolToYul
   MLIRSolDialect
   MLIRYulDialect
   MLIRArithDialect

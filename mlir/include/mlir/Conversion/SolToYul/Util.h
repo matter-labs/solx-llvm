@@ -10,11 +10,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef MLIR_CONVERSION_SOLTOSTANDARD_UTIL_H
-#define MLIR_CONVERSION_SOLTOSTANDARD_UTIL_H
+#ifndef MLIR_CONVERSION_SOLTOYUL_UTIL_H
+#define MLIR_CONVERSION_SOLTOYUL_UTIL_H
 
-#include "mlir/Conversion/SolToStandard/EVMConstants.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Conversion/SolToYul/EVMConstants.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Sol/Sol.h"
@@ -230,4 +229,4 @@ public:
 } // namespace solgen
 } // namespace mlir
 
-#endif // MLIR_CONVERSION_SOLTOSTANDARD_UTIL_H
+#endif // MLIR_CONVERSION_SOLTOYUL_UTIL_H

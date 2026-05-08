@@ -53,7 +53,8 @@ static void testSolPassRegistration(MlirContext ctx) {
   MlirPassManager pm = mlirPassManagerCreate(ctx);
   MlirOpPassManager opm = mlirPassManagerGetAsOpPassManager(pm);
   MlirStringRef pipeline = mlirStringRefCreateFromCString(
-      "builtin.module(sol-licm,sol-lower-modifier,convert-sol-to-std)");
+      "builtin.module(sol-licm,sol-lower-modifier,convert-sol-to-yul,convert-"
+      "yul-to-std)");
 
   MlirLogicalResult status =
       mlirParsePassPipeline(opm, pipeline, dontPrint, NULL);
@@ -65,7 +66,8 @@ static void testSolPassRegistration(MlirContext ctx) {
   fprintf(stderr, "parsing failed before registration\n");
 
   mlirRegisterSolPasses();
-  mlirRegisterConversionConvertSolToStandardPass();
+  mlirRegisterConversionConvertSolToYulPass();
+  mlirRegisterConversionConvertYulToStandardPass();
 
   status = mlirParsePassPipeline(opm, pipeline, dontPrint, NULL);
   if (mlirLogicalResultIsFailure(status)) {
@@ -89,8 +91,9 @@ static void testSolPasses(MlirContext ctx) {
   MlirPassManager pm = mlirPassManagerCreate(ctx);
   mlirPassManagerAddOwnedPass(pm, mlirCreateSolModifierOpLoweringPass());
   mlirPassManagerAddOwnedPass(pm, mlirCreateSolLoopInvariantCodeMotionPass());
+  mlirPassManagerAddOwnedPass(pm, mlirCreateConversionConvertSolToYulPass());
   mlirPassManagerAddOwnedPass(pm,
-                              mlirCreateConversionConvertSolToStandardPass());
+                              mlirCreateConversionConvertYulToStandardPass());
 
   MlirLogicalResult status = mlirPassManagerRunOnOp(pm, moduleOp);
   if (!mlirLogicalResultIsSuccess(status)) {

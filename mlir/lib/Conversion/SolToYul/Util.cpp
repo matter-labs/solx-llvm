@@ -10,8 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Conversion/SolToStandard/Util.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Conversion/SolToYul/Util.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Yul/Yul.h"

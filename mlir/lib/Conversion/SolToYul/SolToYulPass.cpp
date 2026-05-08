@@ -1,4 +1,4 @@
-//===- SolToStandardPass.cpp - Sol to Standard dialect lowering pass -----===//
+//===- SolToYulPass.cpp - Sol to Yul dialect lowering pass ----------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,25 +6,19 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The sol dialect lowering pass.
+// Lowers the sol dialect to the yul dialect (with func/LLVM helpers).
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Conversion/SolToStandard/EVMUtil.h"
-#include "mlir/Conversion/SolToStandard/SolToStandard.h"
-#include "mlir/Conversion/SolToStandard/SolToYul.h"
-#include "mlir/Conversion/SolToStandard/YulToStandard.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Conversion/SolToYul/EVMUtil.h"
+#include "mlir/Conversion/SolToYul/SolToYul.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
 #include "mlir/Transforms/DialectConversion.h"
-#include "llvm/Support/CommandLine.h"
 
 namespace mlir {
-#define GEN_PASS_DEF_CONVERTSOLTOSTANDARDPASS
+#define GEN_PASS_DEF_CONVERTSOLTOYULPASS
 #include "mlir/Conversion/Passes.h.inc"
 } // namespace mlir
 
@@ -61,9 +55,9 @@ struct ConvCastOpLowering : public OpConversionPattern<sol::ConvCastOp> {
   }
 };
 
-/// Pass for lowering the sol dialect to the standard dialects.
-struct ConvertSolToStandardPass
-    : public impl::ConvertSolToStandardPassBase<ConvertSolToStandardPass> {
+/// Pass for lowering the sol dialect to the yul dialect.
+struct ConvertSolToYulPass
+    : public impl::ConvertSolToYulPassBase<ConvertSolToYulPass> {
 
   // TODO: Generalize this comment.
   //
@@ -90,8 +84,8 @@ struct ConvertSolToStandardPass
 
     ConversionTarget convTgt(getContext());
     convTgt.addLegalOp<ModuleOp>();
-    convTgt.addLegalDialect<sol::SolDialect, yul::YulDialect, func::FuncDialect,
-                            LLVM::LLVMDialect>();
+    convTgt
+        .addLegalDialect<sol::SolDialect, yul::YulDialect, LLVM::LLVMDialect>();
     convTgt.addIllegalOp<
         // clang-format off
         sol::ConstantOp,
@@ -230,8 +224,8 @@ struct ConvertSolToStandardPass
                                     evm::SolTypeConverter &tyConv) {
     ConversionTarget convTgt(getContext());
     convTgt.addLegalOp<ModuleOp>();
-    convTgt.addLegalDialect<sol::SolDialect, yul::YulDialect, func::FuncDialect,
-                            LLVM::LLVMDialect>();
+    convTgt
+        .addLegalDialect<sol::SolDialect, yul::YulDialect, LLVM::LLVMDialect>();
     convTgt.addIllegalOp<sol::ContractOp, sol::ICallOp, sol::LoadImmutableOp>();
 
     RewritePatternSet pats(&getContext());
@@ -251,7 +245,7 @@ struct ConvertSolToStandardPass
       ConversionTarget convTgt(getContext());
       convTgt.addLegalOp<ModuleOp>();
       convTgt.addLegalDialect<sol::SolDialect, yul::YulDialect,
-                              func::FuncDialect, LLVM::LLVMDialect>();
+                              LLVM::LLVMDialect>();
       convTgt.addIllegalOp<sol::CallOp, sol::ReturnOp>();
 
       RewritePatternSet pats(&getContext());
@@ -264,8 +258,7 @@ struct ConvertSolToStandardPass
     {
       ConversionTarget convTgt(getContext());
       convTgt.addLegalOp<ModuleOp>();
-      convTgt.addLegalDialect<yul::YulDialect, func::FuncDialect,
-                              LLVM::LLVMDialect>();
+      convTgt.addLegalDialect<yul::YulDialect, LLVM::LLVMDialect>();
       convTgt.addIllegalDialect<sol::SolDialect>();
 
       RewritePatternSet pats(&getContext());
@@ -274,21 +267,6 @@ struct ConvertSolToStandardPass
       if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
         return failure();
     }
-    return success();
-  }
-
-  LogicalResult runYulToStandardConversion(ModuleOp mod) {
-    ConversionTarget convTgt(getContext());
-    convTgt.addLegalOp<ModuleOp>();
-    convTgt.addLegalDialect<func::FuncDialect, cf::ControlFlowDialect,
-                            arith::ArithDialect, LLVM::LLVMDialect>();
-    convTgt.addIllegalDialect<yul::YulDialect>();
-
-    RewritePatternSet pats(&getContext());
-    evm::populateYulPats(pats);
-
-    if (failed(applyPartialConversion(mod, convTgt, std::move(pats))))
-      return failure();
     return success();
   }
 
@@ -304,10 +282,6 @@ struct ConvertSolToStandardPass
       return;
     }
     if (failed(runStage3Conversion(mod, tyConv))) {
-      signalPassFailure();
-      return;
-    }
-    if (failed(runYulToStandardConversion(mod))) {
       signalPassFailure();
       return;
     }
