@@ -2153,11 +2153,11 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
 
   // srcDataLoc is passed explicitly because scalar element types (e.g. ui256)
   // carry no data-location annotation and sol::getDataLocation would return
-  // Stack for them.  The top-level caller derives it from the array type; all
+  // stack for them. The top-level caller derives it from the array type, all
   // recursive calls propagate it directly.
-  Value genCopy(ModuleOp mod, Value srcAddr, Type ty,
-                sol::DataLocation srcDataLoc, PatternRewriter &r,
-                Location loc) const {
+  Value genAllocateAndCopy(ModuleOp mod, Value srcAddr, Type ty,
+                           sol::DataLocation srcDataLoc, PatternRewriter &r,
+                           Location loc) const {
     mlir::solgen::BuilderExt bExt(r, loc);
     evm::Builder evmB(mod, r, loc);
 
@@ -2178,7 +2178,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
         srcDataAddr = srcAddr;
       }
 
-      // Determine element data location: inner array types carry it explicitly;
+      // Determine element data location: inner array types carry it explicitly,
       // scalar elements inherit from the parent array.
       Type eltTy = arrTy.getEltType();
       sol::DataLocation eltSrcDataLoc = sol::getDataLocation(eltTy);
@@ -2200,7 +2200,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
       // Use calldatacopy to copy the entire payload in one operation.
       // TODO: Support multi-dimensional arrays.
       if (srcDataLoc == sol::DataLocation::CallData &&
-          !sol::isNonPtrRefType(eltTy)) {
+          sol::canBePacked(eltTy) && (sol::getNumBytes(eltTy) == 32)) {
         Value sizeInBytes = r.create<yul::MulOp>(
             loc, size, bExt.genI256Const(evm::getCallDataHeadSize(eltTy)));
         r.create<yul::CallDataCopyOp>(loc, dstDataAddr, srcDataAddr,
@@ -2221,7 +2221,8 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
                 sol::hasDynamicallySizedElt(eltTy))
               srcAddrI = evmB.genCalldataAccessRef(eltTy, srcDataAddr, srcAddrI,
                                                    /*isNonABI=*/true, loc);
-            Value subElm = genCopy(mod, srcAddrI, eltTy, eltSrcDataLoc, r, loc);
+            Value subElm =
+                genAllocateAndCopy(mod, srcAddrI, eltTy, eltSrcDataLoc, r, loc);
             evmB.genStore(subElm, dstAddrI, dstDataLoc);
             return SmallVector<Value>{};
           });
@@ -2254,24 +2255,47 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
       llvm_unreachable("NYI: StringType source data location");
     }
 
-    // All packable scalar types can be copied with a plain load. Integers,
-    // address-like, enum, and FuncRef are right-aligned in all data locations.
-    // BytesN (N < 32) is left-aligned in memory/calldata but right-aligned in
-    // storage.
-    assert((isa<IntegerType>(ty) || sol::isBytesLikeType(ty) ||
-            sol::isAddressLikeType(ty) || isa<sol::EnumType>(ty) ||
-            isa<sol::FuncRefType>(ty) || isa<sol::ExtFuncRefType>(ty)) &&
-           "NYI");
-    Value val = evmB.genLoad(srcAddr, srcDataLoc);
-    if (isa<sol::ExtFuncRefType>(ty) &&
-        srcDataLoc == sol::DataLocation::Storage)
-      val = r.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(64));
-    else if (sol::isBytesLikeType(ty) &&
-             srcDataLoc == sol::DataLocation::Storage) {
-      unsigned shift = (32 - sol::getNumBytes(ty)) * 8;
-      if (shift > 0)
-        val = r.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(shift));
+    if (auto structTy = dyn_cast<sol::StructType>(ty)) {
+      ArrayRef<Type> memberTypes = structTy.getMemberTypes();
+      unsigned numMembers = memberTypes.size();
+
+      // Allocate head area: one 32-byte slot per member.
+      Value dstBase = evmB.genMemAlloc(numMembers * 32);
+      auto reader = evmB.makeStructMemberReader(structTy, r, loc, srcAddr);
+
+      for (uint64_t i = 0; i < numMembers; ++i) {
+        Type memberTy = memberTypes[i];
+        Value dstHeadSlot =
+            r.create<yul::AddOp>(loc, dstBase, bExt.genI256Const(i * 32));
+        Value srcResult = reader->read(i);
+
+        if (sol::isNonPtrRefType(memberTy)) {
+          Value memPtr = genAllocateAndCopy(
+              mod, srcResult, memberTy, sol::getDataLocation(memberTy), r, loc);
+          evmB.genStore(memPtr, dstHeadSlot, sol::DataLocation::Memory);
+        } else {
+          Value cleanedResult =
+              evmB.genCleanup(memberTy, srcResult, loc, srcDataLoc);
+          evmB.genStore(cleanedResult, dstHeadSlot, sol::DataLocation::Memory);
+        }
+        if (i + 1 < numMembers)
+          reader->advance(i);
+      }
+      return dstBase;
     }
+
+    assert(sol::canBePacked(ty));
+    Value val = evmB.genLoad(srcAddr, srcDataLoc);
+    unsigned shift = 0;
+    if (srcDataLoc == sol::DataLocation::Storage) {
+      if (isa<sol::ExtFuncRefType>(ty))
+        shift = 64;
+      else if (sol::isBytesLikeType(ty))
+        shift = (32 - sol::getNumBytes(ty)) * 8;
+    }
+    if (shift > 0)
+      val = r.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(shift));
+    val = evmB.genCleanup(ty, val, loc, srcDataLoc);
     return val;
   }
 
@@ -2284,11 +2308,12 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
     Type dstTy = op.getType();
     sol::DataLocation srcDataLoc = sol::getDataLocation(srcTy);
     sol::DataLocation dstDataLoc = sol::getDataLocation(dstTy);
+    assert(!isa<sol::MappingType>(srcTy));
 
     if (dstDataLoc == sol::DataLocation::Memory &&
-        (isa<sol::StringType>(srcTy) || isa<sol::ArrayType>(srcTy))) {
-      r.replaceOp(op, genCopy(getModule(op), adaptor.getInp(), srcTy,
-                              srcDataLoc, r, loc));
+        sol::isNonPtrRefType(srcTy)) {
+      r.replaceOp(op, genAllocateAndCopy(getModule(op), adaptor.getInp(), srcTy,
+                                         srcDataLoc, r, loc));
       return success();
     }
 
