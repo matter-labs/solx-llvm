@@ -14,8 +14,10 @@
 #define MLIR_CONVERSION_SOLTOYUL_EVMUTIL_H
 
 #include "mlir/Conversion/SolToYul/EVMConstants.h"
+#include "mlir/Conversion/SolToYul/Util.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/IR/Builders.h"
+#include <memory>
 #include <optional>
 
 namespace mlir {
@@ -374,10 +376,16 @@ public:
   genCopyStringToStorage(mlir::Value src, mlir::Type ty, mlir::Value dstAddr,
                          std::optional<mlir::Location> locArg = std::nullopt);
 
-  /// Copies an object of type \p ty from \p srcAddr to \p dstAddr.
+  /// Copies an object from (\p srcAddr, \p srcDataLoc) to
+  /// (\p dstAddr, \p dstDataLoc).
   ///
-  /// Currently supports only arrays whose leaf element type is either
-  /// \c StringType or an integer that occupies a full 32-byte storage slot.
+  /// The caller must ensure that \p dstAddr points to already-allocated space
+  /// large enough to hold the object.
+  ///
+  /// Supported: scalars (int, bytesN, addr, enum, FuncRef, ExtFuncRef),
+  /// StringType (any->Stg or any->Mem), StructType (any->Stg only, memory
+  /// copies must be lowered by DataLocCastOpLowering first), and arrays of
+  /// any element type with any packing combination.
   void genCopy(mlir::Type srcTy, mlir::Type dstTy, mlir::Value srcAddr,
                mlir::Value dstAddr, mlir::sol::DataLocation srcDataLoc,
                mlir::sol::DataLocation dstDataLoc,
@@ -475,6 +483,75 @@ public:
   /// Conditionally generates a revert with values. (Useful for debugging)
   void genCondDbgRevert(Value cond, ValueRange vals,
                         std::optional<Location> locArg = std::nullopt);
+
+  /// Creates a StructEncodeMemberReader for \p structTy at \p src, dispatching
+  /// on the struct's embedded data location.
+  std::unique_ptr<struct StructEncodeMemberReader>
+  makeStructMemberReader(sol::StructType structTy, OpBuilder &b, Location loc,
+                         Value src);
+  /// Creates a StructMemberWriter for \p structTy at \p dst, dispatching
+  /// on the struct's embedded data location.
+  std::unique_ptr<struct StructMemberWriter>
+  makeStructMemberWriter(sol::StructType structTy, OpBuilder &b, Location loc,
+                         Value dst);
+};
+
+/// Base class for reading struct members from a concrete source location
+/// (calldata, memory, or storage), used for ABI encoding and genCopy().
+struct StructEncodeMemberReader {
+  sol::StructType structTy;
+  evm::Builder &evmB;
+  OpBuilder &b;
+  Location loc;
+  mlir::solgen::BuilderExt bExt;
+
+  StructEncodeMemberReader(sol::StructType structTy, evm::Builder &evmB,
+                           OpBuilder &b, Location loc)
+      : structTy(structTy), evmB(evmB), b(b), loc(loc), bExt(b, loc) {}
+
+  virtual ~StructEncodeMemberReader() = default;
+
+  Type getMemberType(uint64_t memberIdx) const {
+    return structTy.getMemberTypes()[memberIdx];
+  }
+
+  // Returns the source value for the struct member at memberIdx.
+  // If skipCleanup is true, storage readers return the raw right-shifted field
+  // bits without calling genCleanupPackedStorageValue, other readers ignore it.
+  virtual Value read(uint64_t memberIdx, bool skipCleanup = false) = 0;
+
+  // Emits instruction to advance source position for the next member,
+  // if needed.
+  virtual void advance(uint64_t memberIdx) = 0;
+};
+
+/// Base class for writing struct members to a concrete destination
+/// location (memory or storage).
+struct StructMemberWriter {
+  sol::StructType structTy;
+  evm::Builder &evmB;
+  OpBuilder &b;
+  Location loc;
+  mlir::solgen::BuilderExt bExt;
+
+  StructMemberWriter(sol::StructType structTy, evm::Builder &evmB, OpBuilder &b,
+                     Location loc)
+      : structTy(structTy), evmB(evmB), b(b), loc(loc), bExt(b, loc) {}
+
+  virtual ~StructMemberWriter() = default;
+
+  Type getMemberType(uint64_t memberIdx) const {
+    return structTy.getMemberTypes()[memberIdx];
+  }
+
+  // Writes the source value to the struct member at memberIdx.
+  // srcMemberTy is the source type of the member (carries the correct
+  // DataLocation for aggregate types).
+  virtual void write(uint64_t memberIdx, Value srcVal, Type srcMemberTy) = 0;
+
+  // Emits instruction to advance destination position for the next member,
+  // if needed.
+  virtual void advance(uint64_t memberIdx) = 0;
 };
 
 } // namespace evm

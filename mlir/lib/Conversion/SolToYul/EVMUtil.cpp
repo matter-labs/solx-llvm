@@ -65,34 +65,7 @@ unsigned getCalldataEncodedTailSize(Type ty) {
   llvm_unreachable("Expected dynamically encoded calldata reference type");
 }
 
-// Reads struct members for ABI encoding from a concrete source location
-// (calldata, memory, or storage).
-struct StructEncodeMemberReader {
-  sol::StructType structTy;
-  evm::Builder &evmB;
-  OpBuilder &b;
-  Location loc;
-  mlir::solgen::BuilderExt bExt;
-
-  StructEncodeMemberReader(sol::StructType structTy, evm::Builder &evmB,
-                           OpBuilder &b, Location loc)
-      : structTy(structTy), evmB(evmB), b(b), loc(loc), bExt(b, loc) {}
-
-  virtual ~StructEncodeMemberReader() = default;
-
-  Type getMemberType(uint64_t memberIdx) const {
-    return structTy.getMemberTypes()[memberIdx];
-  }
-
-  // Returns the source value for the struct member at memberIdx.
-  virtual Value read(uint64_t memberIdx) = 0;
-
-  // Emits instruction to advance source position for the next member,
-  // if needed.
-  virtual void advance(uint64_t memberIdx) = 0;
-};
-
-struct StructEncodeMemberReaderCallData final : StructEncodeMemberReader {
+struct StructEncodeMemberReaderCallData final : evm::StructEncodeMemberReader {
   // Base address of this struct head in calldata.
   Value baseAddr;
   // Current calldata head cursor for member traversal.
@@ -100,10 +73,10 @@ struct StructEncodeMemberReaderCallData final : StructEncodeMemberReader {
 
   StructEncodeMemberReaderCallData(sol::StructType structTy, evm::Builder &evmB,
                                    OpBuilder &b, Location loc, Value baseAddr)
-      : StructEncodeMemberReader(structTy, evmB, b, loc), baseAddr(baseAddr),
-        curAddr(baseAddr) {}
+      : evm::StructEncodeMemberReader(structTy, evmB, b, loc),
+        baseAddr(baseAddr), curAddr(baseAddr) {}
 
-  Value read(uint64_t memberIdx) override {
+  Value read(uint64_t memberIdx, bool /*skipCleanup*/ = false) override {
     Type memTy = getMemberType(memberIdx);
     if (sol::hasDynamicallySizedElt(memTy))
       return evmB.genCalldataAccessRef(memTy, baseAddr, curAddr,
@@ -124,15 +97,16 @@ struct StructEncodeMemberReaderCallData final : StructEncodeMemberReader {
   }
 };
 
-struct StructEncodeMemberReaderMemory final : StructEncodeMemberReader {
+struct StructEncodeMemberReaderMemory final : evm::StructEncodeMemberReader {
   // Current memory head cursor for member traversal.
   Value curAddr;
 
   StructEncodeMemberReaderMemory(sol::StructType structTy, evm::Builder &evmB,
                                  OpBuilder &b, Location loc, Value curAddr)
-      : StructEncodeMemberReader(structTy, evmB, b, loc), curAddr(curAddr) {}
+      : evm::StructEncodeMemberReader(structTy, evmB, b, loc),
+        curAddr(curAddr) {}
 
-  Value read(uint64_t) override {
+  Value read(uint64_t, bool /*skipCleanup*/ = false) override {
     Value srcVal = evmB.genLoad(curAddr, sol::DataLocation::Memory, loc);
     return srcVal;
   }
@@ -143,7 +117,7 @@ struct StructEncodeMemberReaderMemory final : StructEncodeMemberReader {
   }
 };
 
-struct StructEncodeMemberReaderStorage final : StructEncodeMemberReader {
+struct StructEncodeMemberReaderStorage final : evm::StructEncodeMemberReader {
   // Base storage slot for the struct.
   Value baseAddr;
 
@@ -154,9 +128,10 @@ struct StructEncodeMemberReaderStorage final : StructEncodeMemberReader {
 
   StructEncodeMemberReaderStorage(sol::StructType structTy, evm::Builder &evmB,
                                   OpBuilder &b, Location loc, Value baseAddr)
-      : StructEncodeMemberReader(structTy, evmB, b, loc), baseAddr(baseAddr) {}
+      : evm::StructEncodeMemberReader(structTy, evmB, b, loc),
+        baseAddr(baseAddr) {}
 
-  Value read(uint64_t memberIdx) override {
+  Value read(uint64_t memberIdx, bool skipCleanup = false) override {
     auto [slotOffset, byteOffset] = structTy.getStorageMemberOffset(memberIdx);
     Type memTy = getMemberType(memberIdx);
     if (sol::canBePacked(memTy)) {
@@ -175,10 +150,98 @@ struct StructEncodeMemberReaderStorage final : StructEncodeMemberReader {
         shifted = b.create<yul::ArithShrOp>(loc, previousSlotValue,
                                             bExt.genI256Const(byteOffset * 8));
 
+      if (skipCleanup)
+        return shifted;
       return evmB.genCleanupPackedStorageValue(memTy, shifted, loc);
     }
 
+    // For a ref type, return its address.
     return b.create<yul::AddOp>(loc, baseAddr, bExt.genI256Const(slotOffset));
+  }
+
+  // Storage traversal is indexed by member number and precomputed offsets.
+  void advance(uint64_t) override {}
+};
+
+struct StructMemberWriterStorage final : evm::StructMemberWriter {
+  // Base storage slot for the struct.
+  Value baseAddr;
+
+  // Cache the last storage slot accumulator and its bitmask to avoid repeated
+  // sstore for packed members that share the same slot.
+  Value accum;
+  // Compile-time OR of each field's bit range within the current slot.
+  // Bits set here are owned by the new value. The rest are preserved from the
+  // existing slot contents via a read-modify-write at flush time.
+  APInt accumMask;
+  std::optional<uint64_t> previousSlotOffset;
+
+  StructMemberWriterStorage(sol::StructType structTy, evm::Builder &evmB,
+                            OpBuilder &b, Location loc, Value baseAddr)
+      : evm::StructMemberWriter(structTy, evmB, b, loc), baseAddr(baseAddr),
+        accum(nullptr), accumMask(APInt::getZero(256)) {}
+
+  void write(uint64_t memberIdx, Value srcVal, Type srcMemberTy) override {
+    auto [slotOffset, byteOffset] = structTy.getStorageMemberOffset(memberIdx);
+    Type dstMemberTy = getMemberType(memberIdx);
+    if (sol::canBePacked(dstMemberTy)) {
+      if (!previousSlotOffset || *previousSlotOffset != slotOffset) {
+        accum = bExt.genI256Const(0);
+        accumMask = APInt::getZero(256);
+        previousSlotOffset = slotOffset;
+      }
+
+      // srcVal arrives pre-cleaned by the struct copy loop: it holds the raw
+      // right-shifted field bits, already masked to the field width by
+      // AND(fieldMask). The writer just positions and accumulates the bits.
+      unsigned storageBits = sol::getNumBytes(dstMemberTy) * 8;
+      APInt fieldMask = APInt::getLowBitsSet(256, storageBits);
+      Value shiftBits = bExt.genI256Const(byteOffset * 8);
+      Value shifted = byteOffset > 0
+                          ? b.create<yul::ArithShlOp>(loc, srcVal, shiftBits)
+                          : srcVal;
+      accum = b.create<yul::OrOp>(loc, accum, shifted);
+
+      // Track which bits of the slot belong to this field so that the flush
+      // can preserve whatever lives in the remaining bits.
+      fieldMask <<= (byteOffset * 8);
+      accumMask |= fieldMask;
+
+      // Flush the accumulator once we've seen every packed member that shares
+      // this slot: either this was the last member, or the next member lives
+      // in a different slot. Deferring the sstore until the slot boundary
+      // avoids writing a partially-filled word and then overwriting it in the
+      // very next iteration.
+      ArrayRef<uint64_t> slotOffsets = structTy.getMemberSlotOffsets();
+      uint64_t nextMemberIdx = memberIdx + 1;
+      if ((nextMemberIdx == slotOffsets.size()) ||
+          (slotOffsets[nextMemberIdx] != slotOffset)) {
+        Value dstSlot =
+            b.create<yul::AddOp>(loc, baseAddr, bExt.genI256Const(slotOffset));
+        APInt fullSlotMask = APInt::getAllOnes(256);
+        if (accumMask == fullSlotMask) {
+          // We are going to overwrite the whole slot, so no need to read
+          // the initial value of the slot.
+          evmB.genStore(accum, dstSlot, sol::DataLocation::Storage, loc);
+        } else {
+          Value oldSlot =
+              evmB.genLoad(dstSlot, sol::DataLocation::Storage, loc);
+          Value preserved =
+              b.create<yul::AndOp>(loc, oldSlot, bExt.genI256Const(~accumMask));
+          Value newSlot = b.create<yul::OrOp>(loc, preserved, accum);
+          evmB.genStore(newSlot, dstSlot, sol::DataLocation::Storage, loc);
+        }
+      }
+    } else {
+      // Only aggregates reach here, all are ref types whose readers return
+      // an address from the source location.
+      assert(sol::isNonPtrRefType(dstMemberTy));
+      Value dstAddr =
+          b.create<yul::AddOp>(loc, baseAddr, bExt.genI256Const(slotOffset));
+      evmB.genCopy(srcMemberTy, dstMemberTy, srcVal, dstAddr,
+                   sol::getDataLocation(srcMemberTy),
+                   sol::DataLocation::Storage, loc);
+    }
   }
 
   // Storage traversal is indexed by member number and precomputed offsets.
@@ -801,6 +864,36 @@ int64_t evm::getMallocSize(Type ty) {
 
   // Value type.
   return 32;
+}
+
+std::unique_ptr<evm::StructEncodeMemberReader>
+evm::Builder::makeStructMemberReader(sol::StructType structTy, OpBuilder &b,
+                                     Location loc, Value src) {
+  switch (sol::getDataLocation(structTy)) {
+  case sol::DataLocation::CallData:
+    return std::make_unique<StructEncodeMemberReaderCallData>(structTy, *this,
+                                                              b, loc, src);
+  case sol::DataLocation::Memory:
+    return std::make_unique<StructEncodeMemberReaderMemory>(structTy, *this, b,
+                                                            loc, src);
+  case sol::DataLocation::Storage:
+    return std::make_unique<StructEncodeMemberReaderStorage>(structTy, *this, b,
+                                                             loc, src);
+  default:
+    llvm_unreachable("Unexpected data location for struct member reader");
+  }
+}
+
+std::unique_ptr<evm::StructMemberWriter>
+evm::Builder::makeStructMemberWriter(sol::StructType structTy, OpBuilder &b,
+                                     Location loc, Value dst) {
+  switch (sol::getDataLocation(structTy)) {
+  case sol::DataLocation::Storage:
+    return std::make_unique<StructMemberWriterStorage>(structTy, *this, b, loc,
+                                                       dst);
+  default:
+    llvm_unreachable("Unexpected data location for struct member writer");
+  }
 }
 
 Value evm::Builder::genIntCleanup(unsigned width, bool isSigned, Value val,
@@ -2390,34 +2483,42 @@ void evm::Builder::genPopString(Value srcAddr, Value oldData, Value length,
 // +----------------------------+----------------------------------------------+
 // | Condition                  | Action                                       |
 // +----------------------------+----------------------------------------------+
-// | Scalar: int, bytesN, addr, | Plain load/store; encoding is identical      |
+// | Scalar: int, addr,         | Plain load/store. Encoding is identical      |
 // |   enum, FuncRef            | across Stg, Mem, and CD.                     |
 // +----------------------------+----------------------------------------------+
-// | ExtFuncRef                 | Mem/CD->Mem/CD: plain 32-byte load/store.    |
-// |                            | Mem/CD->Stg: load, SHR 64 to strip MSB       |
-// |                            |   alignment, then store.                     |
-// |                            | Stg->Mem/CD: load, SHL 64 to restore MSB     |
-// |                            |   alignment, then store.                     |
+// | bytesN, ExtFuncRef         | Mem/CD->Mem/CD: plain 32-byte load/store.    |
+// |                            | Mem/CD->Stg: load, SHR alignShift to         |
+// |                            |   right-align, then store.                   |
+// |                            | Stg->Mem/CD: load, SHL alignShift to         |
+// |                            |   left-align, then store.                    |
 // |                            | Stg->Stg: plain 32-byte load/store.          |
+// |                            | (alignShift = (32-N)*8 for bytesN; 64        |
+// |                            |   for ExtFuncRef)                            |
 // +----------------------------+----------------------------------------------+
 // | StringType (string/bytes)  | any->Stg: genCopyStringToStorage; handles    |
 // |                            |   inline <-> out-of-place transitions.       |
 // |                            | any->Mem: genCopyStringDataToMemory +        |
 // |                            |   store length.                              |
 // +----------------------------+----------------------------------------------+
+// | StructType                 | non-Stg dst: llvm_unreachable; must be       |
+// |                            |   lowered by DataLocCastOpLowering.          |
+// |                            | any->Stg: per-member via                     |
+// |                            |   StructEncodeMemberReader +                 |
+// |                            |   StructMemberWriter.                        |
+// +----------------------------+----------------------------------------------+
 // | Array, packed dst elt      | Stg->Stg, same density: raw slot copy.       |
 // |                            | Stg->Stg, packed src: per-element extract-   |
 // |                            |   convert-repack loop.                       |
 // |                            | Stg->Stg, npacked src: compact-write loop,   |
 // |                            |   one sload per source element.              |
-// |                            | Stg->Mem: compact-read loop: extract +       |
-// |                            |   cleanup + mstore (32-byte word per elt).   |
 // |                            | Mem/CD->Stg: compact-write loop: load +      |
 // |                            |   right-align bytesN + pack into slots.      |
 // +----------------------------+----------------------------------------------+
 // | Array, packed src elt ->   | Stg->Stg: compact-read loop: extract +       |
-// |   NPacked dst              |   optional bytes widen-shift + sstore        |
+// |   npacked dst              |   optional bytes widen-shift + sstore        |
 // |                            |   per element.                               |
+// |                            | Stg->Mem/CD: compact-read loop: extract +    |
+// |                            |   cleanup + store (32-byte word per elt).    |
 // +----------------------------+----------------------------------------------+
 // | Array, generic fallback    | any->any: yul.for over [0, len):             |
 // |   (npacked on both sides,  |   genAddrAtIdx, then resolve CD/Mem ref      |
@@ -2430,12 +2531,24 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  // If the source and destination are the same, skip the copy.
+  assert(!isa<sol::MappingType>(srcTy) && !isa<sol::MappingType>(dstTy));
+
+  // Compile-time SSA identity check.
   if (srcAddr == dstAddr)
     return;
 
   bool srcIsStorage = srcDataLoc == sol::DataLocation::Storage;
   bool dstIsStorage = dstDataLoc == sol::DataLocation::Storage;
+
+  // Runtime self-assignment guard for storage aggregate copies: two distinct
+  // SSA values may still resolve to the same storage slot at runtime.
+  std::optional<OpBuilder::InsertionGuard> selfAssignGuard;
+  if (srcIsStorage && dstIsStorage && sol::isNonPtrRefType(dstTy)) {
+    Value notSelf = bExt.genCmp(yul::CmpPredicate::ne, srcAddr, dstAddr, loc);
+    auto ifOp = bExt.createIf(notSelf, /*withElseRegion=*/false, loc);
+    selfAssignGuard.emplace(b);
+    b.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  }
 
   // Handle the destination array length change.
   if (auto dstArrTy = dyn_cast<sol::ArrayType>(dstTy)) {
@@ -2491,20 +2604,48 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
       if (srcPacked && dstPacked &&
           (sol::getNumBytes(srcEltTy) == sol::getNumBytes(dstEltTy))) {
         unsigned itemsPerSlot = 32 / dstEltByteSize;
-        Value numSlots = b.create<yul::ArithDivOp>(
-            loc,
-            b.create<yul::AddOp>(loc, length,
-                                 bExt.genI256Const(itemsPerSlot - 1)),
-            bExt.genI256Const(itemsPerSlot));
+        unsigned eltBits = dstEltByteSize * 8;
+        APInt fullSlotMask = APInt::getLowBitsSet(256, itemsPerSlot * eltBits);
+
+        Value numFullSlots = b.create<yul::ArithDivOp>(
+            loc, length, bExt.genI256Const(itemsPerSlot));
+        Value remainder = b.create<yul::ArithModOp>(
+            loc, length, bExt.genI256Const(itemsPerSlot));
+
         bExt.createCountedLoop(
-            bExt.genI256Const(0), numSlots, bExt.genI256Const(1), ValueRange{},
-            [&](OpBuilder &b, Location loc, Value i, ValueRange) {
+            bExt.genI256Const(0), numFullSlots, bExt.genI256Const(1),
+            ValueRange{}, [&](OpBuilder &b, Location loc, Value i, ValueRange) {
               Value srcSlot = b.create<yul::AddOp>(loc, srcDataAddr, i);
               Value dstSlot = b.create<yul::AddOp>(loc, dstDataAddr, i);
-              b.create<yul::SStoreOp>(loc, dstSlot,
-                                      b.create<yul::SLoadOp>(loc, srcSlot));
+              Value raw = b.create<yul::SLoadOp>(loc, srcSlot);
+              Value masked = b.create<yul::AndOp>(
+                  loc, raw, bExt.genI256Const(fullSlotMask));
+              b.create<yul::SStoreOp>(loc, dstSlot, masked);
               return SmallVector<Value>{};
             });
+
+        // Handle the final partial slot (if length % itemsPerSlot != 0).
+        Value hasRemainder =
+            bExt.genCmp(yul::CmpPredicate::ne, remainder, bExt.genI256Const(0));
+        auto remIf = bExt.createIf(hasRemainder);
+        {
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointToStart(&remIf.getThenRegion().front());
+
+          Value lastSrcSlot =
+              b.create<yul::AddOp>(loc, srcDataAddr, numFullSlots);
+          Value lastDstSlot =
+              b.create<yul::AddOp>(loc, dstDataAddr, numFullSlots);
+          Value lastRaw = b.create<yul::SLoadOp>(loc, lastSrcSlot);
+          Value remBits =
+              b.create<yul::MulOp>(loc, remainder, bExt.genI256Const(eltBits));
+          Value shifted =
+              b.create<yul::ArithShlOp>(loc, bExt.genI256Const(1), remBits);
+          Value partialMask =
+              b.create<yul::SubOp>(loc, shifted, bExt.genI256Const(1));
+          Value lastMasked = b.create<yul::AndOp>(loc, lastRaw, partialMask);
+          b.create<yul::SStoreOp>(loc, lastDstSlot, lastMasked);
+        }
         return;
       }
 
@@ -2597,16 +2738,19 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
           [&](OpBuilder &b, Location loc, Value srcAddr, Value accum,
               Value shiftBits) {
             Value val = genLoad(srcAddr, srcDataLoc, loc);
-            // BytesN values are left-aligned in memory/calldata. Shift right
-            // to right-align before packing into the storage slot.
-            Value normalized = nullptr;
+            // Validate-and-revert each element from calldata
+            // before packing (e.g. signextend check for signed int types).
+            if (srcDataLoc == sol::DataLocation::CallData)
+              val = genCleanup(dstEltTy, val, loc, /*shouldRevert=*/true);
+
+            // ExtFuncRef is not handled here, as it occupies a full slot in
+            // array.
             if (isa<sol::FixedBytesType>(dstEltTy))
-              normalized = b.create<yul::ArithShrOp>(
-                  loc, val, bExt.genI256Const(256 - numBits));
-            else
-              normalized = val;
+              val = b.create<yul::ArithShrOp>(loc, val,
+                                              bExt.genI256Const(256 - numBits));
+
             Value masked =
-                b.create<yul::AndOp>(loc, normalized, bExt.genI256Const(mask));
+                b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask));
             Value shifted = b.create<yul::ArithShlOp>(loc, masked, shiftBits);
             Value newAccum = b.create<yul::OrOp>(loc, accum, shifted);
             Value nextSrcAddr =
@@ -2647,28 +2791,45 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
                   dstDataLoc, loc);
           return SmallVector<Value>{};
         });
-  } else if (sol::canBePacked(dstTy) && !isa<sol::ExtFuncRefType>(dstTy)) {
-    // BytesN values are left-aligned in memory/calldata, but are right-aligned
-    // in storage. Apply the appropriate shift when crossing the storage
-    // boundary.
+  } else if (sol::canBePacked(dstTy)) {
+    // This path is only taken when copying unpacked array elements.
+    assert((!srcIsStorage && !dstIsStorage) || sol::getNumBytes(dstTy) > 16);
     Value val = genLoad(srcAddr, srcDataLoc, loc);
-    if (sol::isBytesLikeType(dstTy)) {
-      unsigned shift = (32 - sol::getNumBytes(dstTy)) * 8;
-      if (!srcIsStorage && dstIsStorage && shift > 0)
-        val = b.create<yul::ArithShrOp>(loc, val, bExt.genI256Const(shift));
-      else if (srcIsStorage && !dstIsStorage && shift > 0)
-        val = b.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(shift));
+
+    // Apply alignment shifts when crossing the storage boundary:
+    //   bytesN: left-aligned in memory/calldata, right-aligned in storage.
+    //   ExtFuncRef: same left/right convention.
+    unsigned alignShift = 0;
+    if (sol::isBytesLikeType(dstTy))
+      alignShift = (32 - sol::getNumBytes(dstTy)) * 8;
+    else if (isa<sol::ExtFuncRefType>(dstTy))
+      alignShift = 64;
+
+    if (alignShift > 0) {
+      if (srcDataLoc == sol::DataLocation::CallData)
+        val = genCleanup(dstTy, val, loc, /*shouldRevert=*/true);
+
+      if (!srcIsStorage && dstIsStorage)
+        val =
+            b.create<yul::ArithShrOp>(loc, val, bExt.genI256Const(alignShift));
+      else if (srcIsStorage && !dstIsStorage)
+        val =
+            b.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(alignShift));
+    } else {
+      if (dstIsStorage) {
+        if (srcDataLoc == sol::DataLocation::CallData)
+          val = genCleanup(dstTy, val, loc, /*shouldRevert=*/true);
+        // Storage write-side: AND-mask to zero upper bits, matching old codegen
+        // LValue.cpp (chopSignBits=true). genCleanup for signed ints
+        // returns signextend, which would set upper bits to 1 for negative
+        // values and corrupt the storage slot.
+        unsigned storageBits = sol::getNumBytes(dstTy) * 8;
+        APInt fieldMask = APInt::getLowBitsSet(256, storageBits);
+        val = b.create<yul::AndOp>(loc, val, bExt.genI256Const(fieldMask));
+      } else {
+        val = genCleanup(dstTy, val, loc, srcDataLoc);
+      }
     }
-    genStore(val, dstAddr, dstDataLoc, loc);
-  } else if (isa<sol::ExtFuncRefType>(dstTy)) {
-    // ExtFuncRef, 24-byte (addr << 32 | sel) value, is stored left-aligned
-    // in memory/calldata. It's right-aligned in storage. Shift a value by 64
-    // when cross-data-location copying.
-    Value val = genLoad(srcAddr, srcDataLoc, loc);
-    if (!srcIsStorage && dstIsStorage)
-      val = b.create<yul::ArithShrOp>(loc, val, bExt.genI256Const(64, loc));
-    else if (srcIsStorage && !dstIsStorage)
-      val = b.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(64, loc));
     genStore(val, dstAddr, dstDataLoc, loc);
   } else if (isa<sol::StringType>(dstTy)) {
     if (dstDataLoc == sol::DataLocation::Storage) {
@@ -2679,6 +2840,76 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
           genCopyStringDataToMemory(srcAddr, srcTy, dstDataAddr, loc);
       // Write the string length.
       genStore(length, dstAddr, dstDataLoc, loc);
+    }
+  } else if (auto dstStructTy = dyn_cast<sol::StructType>(dstTy)) {
+    // Struct copies to memory are handled by DataLocCastOpLowering.
+    // genCopy only sees struct copies whose destination is storage.
+    if (dstDataLoc != sol::DataLocation::Storage)
+      llvm_unreachable(
+          "struct -> memory copy must be lowered by DataLocCastOpLowering");
+    auto srcStructTy = cast<sol::StructType>(srcTy);
+    ArrayRef<Type> memberTypes = dstStructTy.getMemberTypes();
+    ArrayRef<Type> srcMemberTypes = srcStructTy.getMemberTypes();
+    assert(memberTypes.size() == srcMemberTypes.size());
+
+    std::unique_ptr<StructEncodeMemberReader> srcReader =
+        makeStructMemberReader(srcStructTy, b, loc, srcAddr);
+    std::unique_ptr<StructMemberWriter> dstWriter =
+        makeStructMemberWriter(dstStructTy, b, loc, dstAddr);
+
+    bool srcIsCallData =
+        srcStructTy.getDataLocation() == sol::DataLocation::CallData;
+
+    for (uint64_t i = 0, e = memberTypes.size(); i < e; ++i) {
+      Type dstMemberTy = memberTypes[i];
+      bool packedDstMember = dstIsStorage && sol::canBePacked(dstMemberTy);
+      // For storage→storage packed members, skip canonical-form conversion in
+      // the reader and apply AND(fieldMask) here. This avoids the
+      // signextend+AND and shl+shr round-trips that
+      // genCleanupPackedStorageValue introduces for signed integers, bytesN,
+      // and ExtFuncRef types.
+      Value val =
+          srcReader->read(i, /*skipCleanup=*/packedDstMember && srcIsStorage);
+      if (packedDstMember) {
+        unsigned storageBits = sol::getNumBytes(dstMemberTy) * 8;
+        APInt fieldMask = APInt::getLowBitsSet(256, storageBits);
+        if (srcIsStorage) {
+          // Raw right-shifted field bits from the storage reader AND to field
+          // width without sign-extending.
+          val = b.create<yul::AndOp>(loc, val, bExt.genI256Const(fieldMask));
+        } else {
+          // Memory/calldata source: bytesN and ExtFuncRef are left-aligned.
+          unsigned alignShift = 0;
+          if (sol::isBytesLikeType(dstMemberTy))
+            alignShift = (32 - sol::getNumBytes(dstMemberTy)) * 8;
+          else if (isa<sol::ExtFuncRefType>(dstMemberTy))
+            alignShift = 64;
+
+          if (alignShift > 0) {
+            if (srcIsCallData)
+              val = genCleanup(dstMemberTy, val, loc, /*shouldRevert=*/true);
+            val = b.create<yul::ArithShrOp>(loc, val,
+                                            bExt.genI256Const(alignShift));
+          } else if (srcIsCallData) {
+            val = genCleanup(dstMemberTy, val, loc, /*shouldRevert=*/true);
+            // genCleanup for signed integers returns signextend(), which leaves
+            // sign bits set in bits [255..storageBits] for negative values.
+            // Mask to field width so the writer receives field-masked bits.
+            if (auto intTy = dyn_cast<IntegerType>(dstMemberTy);
+                intTy && intTy.isSigned() && intTy.getWidth() < 256)
+              val =
+                  b.create<yul::AndOp>(loc, val, bExt.genI256Const(fieldMask));
+          } else {
+            // Memory source: AND to field width without sign-extending.
+            val = b.create<yul::AndOp>(loc, val, bExt.genI256Const(fieldMask));
+          }
+        }
+      }
+      dstWriter->write(i, val, srcMemberTypes[i]);
+      if (i + 1 < e) {
+        srcReader->advance(i);
+        dstWriter->advance(i);
+      }
     }
   } else {
     llvm_unreachable("NYI");
@@ -2746,23 +2977,8 @@ Value evm::Builder::genABIEncodingImpl(
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
     // ---- Shared setup: member reader + member sub-options. -------------
     auto dataLoc = structTy.getDataLocation();
-    std::unique_ptr<StructEncodeMemberReader> reader;
-    switch (dataLoc) {
-    case sol::DataLocation::CallData:
-      reader = std::make_unique<StructEncodeMemberReaderCallData>(
-          structTy, *this, b, loc, src);
-      break;
-    case sol::DataLocation::Memory:
-      reader = std::make_unique<StructEncodeMemberReaderMemory>(structTy, *this,
-                                                                b, loc, src);
-      break;
-    case sol::DataLocation::Storage:
-      reader = std::make_unique<StructEncodeMemberReaderStorage>(
-          structTy, *this, b, loc, src);
-      break;
-    default:
-      llvm_unreachable("Unexpected data location for struct encoding");
-    }
+    std::unique_ptr<StructEncodeMemberReader> reader =
+        makeStructMemberReader(structTy, b, loc, src);
 
     auto memberTypes = structTy.getMemberTypes();
     ABIEncodingOptions memSub = opts;
