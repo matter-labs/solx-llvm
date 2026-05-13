@@ -19,7 +19,6 @@ target triple = "evm"
 ; CHECK-NEXT:   ModulePass Manager
 ; CHECK-NEXT:     Pre-ISel Intrinsic Lowering
 ; CHECK-NEXT:     EVM Verifier
-; CHECK-NEXT:     EVM Lower Intrinsics
 ; CHECK-NEXT:     FunctionPass Manager
 ; CHECK-NEXT:       Module Verifier
 ; CHECK-NEXT:       Dominator Tree Construction

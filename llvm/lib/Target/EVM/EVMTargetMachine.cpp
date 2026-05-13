@@ -55,7 +55,6 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeEVMTarget() {
   initializeEVMCodegenPreparePass(PR);
   initializeEVMAllocaHoistingPass(PR);
   initializeEVMLinkRuntimePass(PR);
-  initializeEVMLowerIntrinsicsPass(PR);
   initializeEVMOptimizeLiveIntervalsPass(PR);
   initializeEVMPeepholePass(PR);
   initializeEVMSingleUseExpressionPass(PR);
@@ -255,7 +254,6 @@ public:
 
 void EVMPassConfig::addIRPasses() {
   addPass(createEVMVerifierPass());
-  addPass(createEVMLowerIntrinsicsPass());
   if (TM->getOptLevel() > CodeGenOptLevel::Less) {
     addPass(createEarlyCSEPass(true));
     addPass(createGVNPass());

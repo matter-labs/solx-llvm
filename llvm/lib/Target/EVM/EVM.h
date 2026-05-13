@@ -47,7 +47,6 @@ unsigned constexpr MLOAD = 3;
 } // namespace EVMCOST
 
 // LLVM IR passes.
-ModulePass *createEVMLowerIntrinsicsPass();
 FunctionPass *createEVMCodegenPreparePass();
 ImmutablePass *createEVMAAWrapperPass();
 ImmutablePass *createEVMExternalAAWrapperPass();
@@ -74,7 +73,6 @@ ModulePass *createEVMVerifierPass();
 // PassRegistry initialization declarations.
 void initializeEVMCodegenPreparePass(PassRegistry &);
 void initializeEVMAllocaHoistingPass(PassRegistry &);
-void initializeEVMLowerIntrinsicsPass(PassRegistry &);
 void initializeEVMArgumentMovePass(PassRegistry &);
 void initializeEVMLinkRuntimePass(PassRegistry &);
 void initializeEVMOptimizeLiveIntervalsPass(PassRegistry &);
