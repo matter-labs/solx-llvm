@@ -68,6 +68,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeEVMTarget() {
   initializeEVMFinalizeStackFramesPass(PR);
   initializeEVMMarkRecursiveFunctionsPass(PR);
   initializeEVMConstantUnfoldingPass(PR);
+  initializeEVMVerifierPass(PR);
 }
 
 static std::string computeDataLayout() {
@@ -191,6 +192,10 @@ void EVMTargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
           PM.addPass(EVMAlwaysInlinePass());
           return true;
         }
+        if (PassName == "evm-verifier") {
+          PM.addPass(EVMVerifierPass());
+          return true;
+        }
         return false;
       });
 
@@ -249,6 +254,7 @@ public:
 } // namespace
 
 void EVMPassConfig::addIRPasses() {
+  addPass(createEVMVerifierPass());
   addPass(createEVMLowerIntrinsicsPass());
   if (TM->getOptLevel() > CodeGenOptLevel::Less) {
     addPass(createEarlyCSEPass(true));
@@ -272,6 +278,13 @@ void EVMPassConfig::addIRPasses() {
 bool EVMPassConfig::addPreISel() {
   TargetPassConfig::addPreISel();
   addPass(createEVMMarkRecursiveFunctionsPass());
+
+  // We'd prefer to run EVMVerifier at the end of addISelPrepare, but the
+  // legacy PassManager retires the active FunctionPassManager when a
+  // ModulePass is inserted there, which breaks Function AA for the ISel
+  // passes that follow. This placement is fine for the checks we have today,
+  // so once the legacy PM is gone and we move to the new PM, we can revisit.
+  addPass(createEVMVerifierPass());
   return false;
 }
 

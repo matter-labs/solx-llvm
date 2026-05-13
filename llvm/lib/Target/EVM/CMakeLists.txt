@@ -71,6 +71,7 @@ add_llvm_target(EVMCodeGen
   EVMSubtarget.cpp
   EVMTargetMachine.cpp
   EVMTargetTransformInfo.cpp
+  EVMVerifier.cpp
 
   LINK_COMPONENTS
   Analysis

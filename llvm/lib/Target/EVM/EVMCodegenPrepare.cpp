@@ -63,8 +63,29 @@ void EVMCodegenPrepare::processMemTransfer(MemTransferInst *M) {
   // See if the source could be modified by this memmove potentially.
   LLVM_DEBUG(dbgs() << "EVM codegenprepare: Replace:" << *M
                     << " with the target instinsic\n");
+
+  // EVMVerifier will catch unsupported cases, so no need to assert here.
+  if (M->getDestAddressSpace() != EVMAS::AS_HEAP)
+    return;
+
   unsigned SrcAS = M->getSourceAddressSpace();
-  assert(M->getDestAddressSpace() == EVMAS::AS_HEAP);
+  Intrinsic::ID IntrID = Intrinsic::not_intrinsic;
+  switch (SrcAS) {
+  case EVMAS::AS_HEAP:
+    IntrID = Intrinsic::evm_memmoveas1as1;
+    break;
+  case EVMAS::AS_CALL_DATA:
+    IntrID = Intrinsic::evm_memcpyas1as2;
+    break;
+  case EVMAS::AS_RETURN_DATA:
+    IntrID = Intrinsic::evm_memcpyas1as3;
+    break;
+  case EVMAS::AS_CODE:
+    IntrID = Intrinsic::evm_memcpyas1as4;
+    break;
+  default:
+    return;
+  }
 
   // If the length type is not i256, zext it.
   Value *Len = M->getLength();
@@ -79,25 +100,6 @@ void EVMCodegenPrepare::processMemTransfer(MemTransferInst *M) {
       // It may look a bit hacky, but should be OK.
       M->setArgOperand(2, Builder.CreateZExt(Len, Int256Ty));
     }
-  }
-
-  Intrinsic::ID IntrID = Intrinsic::not_intrinsic;
-  switch (SrcAS) {
-  default:
-    llvm_unreachable("Unexpected source address space of memcpy/memset");
-    break;
-  case EVMAS::AS_HEAP:
-    IntrID = Intrinsic::evm_memmoveas1as1;
-    break;
-  case EVMAS::AS_CALL_DATA:
-    IntrID = Intrinsic::evm_memcpyas1as2;
-    break;
-  case EVMAS::AS_RETURN_DATA:
-    IntrID = Intrinsic::evm_memcpyas1as3;
-    break;
-  case EVMAS::AS_CODE:
-    IntrID = Intrinsic::evm_memcpyas1as4;
-    break;
   }
   M->setCalledFunction(
       Intrinsic::getOrInsertDeclaration(M->getModule(), IntrID));

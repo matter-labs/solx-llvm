@@ -18,6 +18,7 @@ target triple = "evm"
 ; CHECK-NEXT: Machine Branch Probability Analysis
 ; CHECK-NEXT:   ModulePass Manager
 ; CHECK-NEXT:     Pre-ISel Intrinsic Lowering
+; CHECK-NEXT:     EVM Verifier
 ; CHECK-NEXT:     EVM Lower Intrinsics
 ; CHECK-NEXT:     FunctionPass Manager
 ; CHECK-NEXT:       Module Verifier
@@ -61,6 +62,7 @@ target triple = "evm"
 ; CHECK-NEXT:       Remove unreachable blocks from the CFG
 ; CHECK-NEXT:     CallGraph Construction
 ; CHECK-NEXT:     EVM mark recursive functions
+; CHECK-NEXT:     EVM Verifier
 ; CHECK-NEXT:     FunctionPass Manager
 ; CHECK-NEXT:       Dominator Tree Construction
 ; CHECK-NEXT:       Basic Alias Analysis (stateless AA impl)
