@@ -213,6 +213,20 @@ static void initializeLibCalls(TargetLibraryInfoImpl &TLI, const Triple &T,
     return;
   }
 
+  // EVM local begin
+  // EVM doesn't have any libcalls, and disabling them here prevents several
+  // optimization passes from introducing invalid transformations (e.g. memset
+  // optimizations on the storage address space). This also disables valid
+  // transformations on byte address spaces such as the heap. A more granular
+  // fix would guard each memtransfer-emitting pass on the address space where
+  // it can emit an invalid transformation (e.g. storage) and add an efficient
+  // EVM lowering for valid transformations, which is not worth it.
+  if (T.isEVM()) {
+    TLI.disableAllFunctions();
+    return;
+  }
+  // EVM local end
+
   // memset_pattern{4,8,16} is only available on iOS 3.0 and Mac OS X 10.5 and
   // later. All versions of watchOS support it.
   if (T.isMacOSX()) {

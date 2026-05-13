@@ -7,7 +7,8 @@ target triple = "evm"
 define void @test_storage() {
 ; CHECK-LABEL: define void @test_storage() {
 ; CHECK-NEXT:  [[ENTRY:.*:]]
-; CHECK-NEXT:    call void @llvm.memset.p5.i64(ptr addrspace(5) align 1 null, i8 0, i64 32, i1 false)
+; CHECK-NEXT:    store i256 0, ptr addrspace(5) null, align 1
+; CHECK-NEXT:    store i256 0, ptr addrspace(5) null, align 1
 ; CHECK-NEXT:    ret void
 ;
 entry:
@@ -19,7 +20,8 @@ entry:
 define void @test_heap() {
 ; CHECK-LABEL: define void @test_heap() {
 ; CHECK-NEXT:  [[ENTRY:.*:]]
-; CHECK-NEXT:    call void @llvm.memset.p1.i64(ptr addrspace(1) align 1 null, i8 0, i64 32, i1 false)
+; CHECK-NEXT:    store i256 0, ptr addrspace(1) null, align 1
+; CHECK-NEXT:    store i256 0, ptr addrspace(1) null, align 1
 ; CHECK-NEXT:    ret void
 ;
 entry:
