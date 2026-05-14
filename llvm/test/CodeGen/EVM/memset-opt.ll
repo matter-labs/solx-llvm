@@ -4,6 +4,10 @@
 target datalayout = "E-p:256:256-i256:256:256-S256-a:256:256"
 target triple = "evm"
 
+@data1 = private addrspace(4) constant [64 x i8] c"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+declare void @llvm.memcpy.p1.p4.i256(ptr addrspace(1) noalias nocapture writeonly, ptr addrspace(4) noalias nocapture readonly, i256, i1 immarg)
+
 define void @test_storage() {
 ; CHECK-LABEL: define void @test_storage() {
 ; CHECK-NEXT:  [[ENTRY:.*:]]
@@ -27,5 +31,14 @@ define void @test_heap() {
 entry:
   store i256 0, ptr addrspace(1) null, align 1
   store i256 0, ptr addrspace(1) null, align 1
+  ret void
+}
+
+define void @test_memcpy_to_memset() {
+; CHECK-LABEL: define void @test_memcpy_to_memset() {
+; CHECK-NEXT:    call void @llvm.memset.p1.i256(ptr addrspace(1) null, i8 102, i256 64, i1 false)
+; CHECK-NEXT:    ret void
+;
+  call void @llvm.memcpy.p1.p4.i256(ptr addrspace(1) null, ptr addrspace(4) @data1, i256 64, i1 false)
   ret void
 }
