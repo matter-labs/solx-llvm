@@ -243,6 +243,9 @@ struct ModifierOpLoweringPass
         getNearestUnusedSymFrom(callerFn, callerFn.getSymNameAttr()));
     // Don't duplicate an interface function.
     callerFn.removeSelectorAttr();
+    // The renamed callerFn becomes the internal body; only the new wrapper
+    // should carry the constructor/fallback/receive kind.
+    callerFn.removeKindAttr();
     b.setInsertionPointToStart(newCallerFn.addEntryBlock());
     // The sol.placeholder will be replaced with the first modifier. This
     // simplifies the placeholder replacement loop.
