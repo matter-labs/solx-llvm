@@ -36,7 +36,7 @@ entry:
 
 define void @test_memcpy_to_memset() {
 ; CHECK-LABEL: define void @test_memcpy_to_memset() {
-; CHECK-NEXT:    call void @llvm.memset.p1.i256(ptr addrspace(1) null, i8 102, i256 64, i1 false)
+; CHECK-NEXT:    call void @llvm.memcpy.p1.p4.i256(ptr addrspace(1) null, ptr addrspace(4) @data1, i256 64, i1 false)
 ; CHECK-NEXT:    ret void
 ;
   call void @llvm.memcpy.p1.p4.i256(ptr addrspace(1) null, ptr addrspace(4) @data1, i256 64, i1 false)

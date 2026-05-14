@@ -53,6 +53,9 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+// EVM local begin
+#include "llvm/TargetParser/Triple.h"
+// EVM local end
 #include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
 #include <cassert>
@@ -1780,6 +1783,12 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
     // Degenerate case: memcpy marked as not accessing memory.
     return false;
 
+  // EVM local begin
+  // On EVM, memcpy lowers to a single instruction, so we must not transform it
+  // into memset. Doing so is less efficient and rejected by the verifier.
+  // clang-format off
+  Triple TT(M->getFunction()->getParent()->getTargetTriple());
+  if (!TT.isEVM()) {
   // If copying from a constant, try to turn the memcpy into a memset.
   if (auto *GV = dyn_cast<GlobalVariable>(M->getSource()))
     if (GV->isConstant() && GV->hasDefinitiveInitializer())
@@ -1797,6 +1806,9 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
         ++NumCpyToSet;
         return true;
       }
+  }
+  // clang-format on
+  // EVM local end
 
   BatchAAResults BAA(*AA, EEA);
   // FIXME: Not using getClobberingMemoryAccess() here due to PR54682.
