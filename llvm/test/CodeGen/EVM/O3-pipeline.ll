@@ -142,6 +142,8 @@ target triple = "evm"
 ; CHECK-NEXT:       Post-RA pseudo instruction expansion pass
 ; CHECK-NEXT:       Insert fentry calls
 ; CHECK-NEXT:       Insert XRay ops
+; CHECK-NEXT:       Remove unreachable machine basic blocks
+; CHECK-NEXT:       EVM Fix Irreducible Control Flow
 ; CHECK-NEXT:       EVM split critical edges
 ; CHECK-NEXT:       MachineDominator Tree Construction
 ; CHECK-NEXT:       Slot index numbering

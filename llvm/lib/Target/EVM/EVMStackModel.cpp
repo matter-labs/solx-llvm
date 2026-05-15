@@ -23,7 +23,8 @@ bool llvm::isLinkerPseudoMI(const MachineInstr &MI) {
 }
 bool llvm::isPushOrDupLikeMI(const MachineInstr &MI) {
   return isLinkerPseudoMI(MI) || MI.getOpcode() == EVM::CONST_I256 ||
-         MI.getOpcode() == EVM::COPY_I256;
+         MI.getOpcode() == EVM::COPY_I256 ||
+         MI.getOpcode() == EVM::IMPLICIT_DEF;
 }
 bool llvm::isNoReturnCallMI(const MachineInstr &MI) {
   assert(MI.getOpcode() == EVM::FCALL && "Unexpected call instruction");
@@ -133,7 +134,10 @@ void EVMStackModel::processMI(const MachineInstr &MI) {
     MIInputMap[&MI] = Stack(1, getSymbolSlot(Sym, &MI));
     return;
   }
-
+  if (Opc == EVM::IMPLICIT_DEF) {
+    MIInputMap[&MI] = Stack(1, getLiteralSlot(APInt::getZero(256)));
+    return;
+  }
   MIInputMap[&MI] = getSlotsForInstructionUses(MI);
 }
 

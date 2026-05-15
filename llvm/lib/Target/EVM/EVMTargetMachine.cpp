@@ -68,6 +68,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeEVMTarget() {
   initializeEVMMarkRecursiveFunctionsPass(PR);
   initializeEVMConstantUnfoldingPass(PR);
   initializeEVMVerifierPass(PR);
+  initializeEVMFixIrreducibleControlFlowPass(PR);
 }
 
 static std::string computeDataLayout() {
@@ -333,6 +334,11 @@ void EVMPassConfig::addPreEmitPass() {
 
   // FIXME: enable all the passes below, but the Stackify with EVMKeepRegisters.
   if (!EVMKeepRegisters) {
+    // Run unreachable block elimination before fixing irreducible control flow,
+    // as that pass expects to see only reachable blocks. If we don't do this,
+    // assert can trigger in that pass.
+    addPass(&UnreachableMachineBlockElimID);
+    addPass(createEVMFixIrreducibleControlFlow());
     addPass(createEVMSplitCriticalEdges());
     addPass(createEVMOptimizeLiveIntervals());
     addPass(createEVMSingleUseExpression());

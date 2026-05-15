@@ -86,7 +86,7 @@ static void convertImplicitDefToConstZero(MachineInstr *MI,
                                           const TargetInstrInfo *TII,
                                           MachineFunction &MF,
                                           LiveIntervals &LIS) {
-  assert(MI->getOpcode() == TargetOpcode::IMPLICIT_DEF);
+  assert(MI->getOpcode() == EVM::IMPLICIT_DEF);
 
   assert(MRI.getRegClass(MI->getOperand(0).getReg()) == &EVM::GPRRegClass);
   MI->setDesc(TII->get(EVM::CONST_I256));
@@ -763,7 +763,7 @@ bool EVMSingleUseExpression::runOnMachineFunction(MachineFunction &MF) {
         // If the instruction we just stackified is an IMPLICIT_DEF, convert it
         // to a constant 0 so that the def is explicit, and the push/pop
         // correspondence is maintained.
-        if (Insert->getOpcode() == TargetOpcode::IMPLICIT_DEF)
+        if (Insert->getOpcode() == EVM::IMPLICIT_DEF)
           convertImplicitDefToConstZero(Insert, MRI, TII, MF, LIS);
 
         // We stackified an operand. Add the defining instruction's operands to

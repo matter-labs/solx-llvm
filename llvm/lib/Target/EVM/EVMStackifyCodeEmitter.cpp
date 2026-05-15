@@ -63,7 +63,7 @@ void EVMStackifyCodeEmitter::CodeEmitter::emitInst(const MachineInstr *MI) {
   assert(Opc != EVM::JUMP && Opc != EVM::JUMPI && Opc != EVM::JUMP_UNLESS &&
          Opc != EVM::ARGUMENT && Opc != EVM::RET && Opc != EVM::CONST_I256 &&
          Opc != EVM::COPY_I256 && Opc != EVM::FCALL &&
-         "Unexpected instruction");
+         Opc != EVM::IMPLICIT_DEF && "Unexpected instruction");
 
   size_t NumInputs = MI->getNumExplicitOperands() - MI->getNumExplicitDefs();
   assert(StackHeight >= NumInputs && "Not enough operands on the stack");
