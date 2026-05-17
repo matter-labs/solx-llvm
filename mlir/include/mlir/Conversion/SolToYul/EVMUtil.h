@@ -16,7 +16,6 @@
 #include "mlir/Conversion/SolToYul/EVMConstants.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/IR/Builders.h"
-#include "llvm/ADT/APInt.h"
 #include <optional>
 
 namespace mlir {
@@ -54,9 +53,46 @@ unsigned getAlignment(Value ptr);
 /// MLIR version of solidity ast's Type::calldataHeadSize.
 unsigned getCallDataHeadSize(Type ty);
 
+/// Per-element iteration step. Unit depends on data location: memory-word
+/// bytes for Memory/CallData, storage slots for Storage.
+unsigned getArrayEltStride(sol::ArrayType arrTy);
+
 /// Returns the size (in bytes) of static type without recursively calculating
 /// the element type size.
 int64_t getMallocSize(Type ty);
+
+/// ABI encoding knobs. Trimmed subset of upstream solc's `EncodingOptions` in
+/// libsolidity/codegen/ABIFunctions.h:129-146 - only the two fields any type
+/// branch currently consults are kept. The two common shapes
+/// (`{padded=true, dynamicInplace=false}` for standard, `{padded=false,
+/// dynamicInplace=true}` for packed) have wrappers (`genABIEncoding` /
+/// `genABIEncodingPacked`); only uncommon callers spell out the struct.
+///
+/// Naming convention used in the implementation comments:
+///  - "standard mode" / "standard encoding" => `dynamicInplace=false`. What
+///    `abi.encode` produces: head + tail with offsets, length prefixes on
+///    dynamic types.
+///  - "packed mode" / "packed encoding"     => `dynamicInplace=true`. What
+///    `abi.encodePacked` produces: single contiguous cursor, no offsets, no
+///    length prefixes. `padded` varies within packed mode - false at the top
+///    level, true inside containers after the recursive call site resets it
+///    (upstream parity, see note below).
+///
+/// Container-element / struct-member recursion always forces `padded=true`,
+/// mirroring upstream solc's `subOptions` reset in
+/// `abiEncodingFunctionSimpleArray`, `abiEncodingFunctionCompactStorageArray`,
+/// and `abiEncodingFunctionStruct`. This is spelled out at each recursive
+/// call site rather than wrapped in a helper, since some sites additionally
+/// force `dynamicInplace=false` (head/tail element calls) while others
+/// preserve `dynamicInplace=true` (packed struct/array recursion).
+struct ABIEncodingOptions {
+  /// Pad value types to 32B (no MSB shift); zero-pad `bytes`/`string` payload
+  /// to a 32B multiple; advance head by padded `calldataEncodedSize`.
+  bool padded = true;
+  /// Drop length prefix for dynamic arrays/`bytes`/`string`; encode
+  /// struct/array body contiguously (no head + tail with offset words).
+  bool dynamicInplace = false;
+};
 
 /// IR Builder for EVM specific lowering.
 class Builder {
@@ -146,6 +182,14 @@ private:
   Value genMemAlloc(Type ty, bool zeroInit, ValueRange initVals, Value sizeVar,
                     int64_t recDepth,
                     std::optional<Location> locArg = std::nullopt);
+
+  /// Recursive primitive for `genABIEncoding` covering the full type taxonomy
+  /// parameterised by `opts`. `dstAddrInTail`, `tupleStart`, `tailAddr` are
+  /// meaningful only when `opts.dynamicInplace=false`.
+  Value genABIEncodingImpl(Type ty, Value src, Value dstAddr,
+                           ABIEncodingOptions opts, bool dstAddrInTail,
+                           Value tupleStart, Value tailAddr, Location loc,
+                           std::optional<sol::DataLocation> srcDataLoc);
 
   /// Zeroes storage slots in the out-of-place data area of a storage
   /// string/bytes at \p dstAddr that are no longer needed when the content
@@ -362,19 +406,21 @@ public:
   void genABITupleSizeAssert(TypeRange tys, Value size,
                              std::optional<Location> locArg = std::nullopt);
 
-  /// Generates the tuple encoder code as per the ABI and return the new tail
-  /// address. When `includeLengthPrefix` is false, the encoding does not
-  /// include the length word for dynamic arrays (used by the packed encoding).
-  Value genABITupleEncoding(
-      Type ty, Value src, Value dstAddr, bool dstAddrInTail, Value tupleStart,
-      Value tailAddr, std::optional<Location> locArg = std::nullopt,
-      std::optional<sol::DataLocation> srcDataLoc = std::nullopt,
-      bool includeLengthPrefix = true);
+  /// Encodes `vals` of `tys` into memory at `startAddr`. Returns the address
+  /// just past the last written byte. Singleton ranges are valid (e.g.
+  /// indexed-event keccak input).
+  Value genABIEncoding(TypeRange tys, ValueRange vals, Value startAddr,
+                       ABIEncodingOptions opts,
+                       std::optional<Location> locArg = std::nullopt);
 
-  /// Generates the tuple encoder code as per the ABI and returns the address at
-  /// the end of the tuple.
-  Value genABITupleEncoding(TypeRange tys, ValueRange vals, Value tupleStart,
-                            std::optional<Location> locArg = std::nullopt);
+  /// Standard ABI encoding (`abi.encode` shape).
+  Value genABIEncoding(TypeRange tys, ValueRange vals, Value startAddr,
+                       std::optional<Location> locArg = std::nullopt);
+
+  /// Packed ABI encoding (`abi.encodePacked` / indexed-event keccak input).
+  Value genABIEncodingPacked(TypeRange tys, ValueRange vals, Value startAddr,
+                             std::optional<Location> locArg = std::nullopt);
+
   Value genABITupleEncoding(std::string const &str, Value headStart,
                             std::optional<Location> locArg = std::nullopt);
 
@@ -386,16 +432,6 @@ public:
   void genABITupleDecoding(TypeRange tys, Value tupleStart, Value tupleEnd,
                            std::vector<Value> &results, bool fromMem,
                            std::optional<Location> locArg = std::nullopt);
-
-  /// Generates packed (non-padded) encoding for a single value and returns the
-  /// address after the encoded bytes.
-  Value genABIPackedEncoding(Type ty, Value val, Value addr,
-                             std::optional<Location> locArg = std::nullopt);
-
-  /// Generates packed (non-padded) encoding for a tuple of values and returns
-  /// the address after all encoded bytes.
-  Value genABIPackedEncoding(TypeRange tys, ValueRange vals, Value addr,
-                             std::optional<Location> locArg = std::nullopt);
 
   /// Generates the panic code.
   void genPanic(PanicCode code, std::optional<Location> locArg = std::nullopt);

@@ -17,7 +17,6 @@
 #include "mlir/Conversion/SolToYul/EVMUtil.h"
 #include "mlir/Conversion/SolToYul/EVMConstants.h"
 #include "mlir/Conversion/SolToYul/Util.h"
-#include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/Yul/Yul.h"
 #include "llvm/ADT/SmallSet.h"
@@ -771,6 +770,20 @@ unsigned evm::getCallDataHeadSize(Type ty) {
   llvm_unreachable("NYI: Other types");
 }
 
+unsigned evm::getArrayEltStride(sol::ArrayType arrTy) {
+  Type eltTy = arrTy.getEltType();
+  switch (arrTy.getDataLocation()) {
+  case sol::DataLocation::Memory:
+    return 32;
+  case sol::DataLocation::CallData:
+    return getCallDataHeadSize(eltTy);
+  case sol::DataLocation::Storage:
+    return sol::getStorageSlotCount(eltTy);
+  default:
+    llvm_unreachable("Unexpected array data location");
+  }
+}
+
 int64_t evm::getMallocSize(Type ty) {
   // String type is dynamic.
   assert(!isa<sol::StringType>(ty));
@@ -869,7 +882,7 @@ Value evm::Builder::genCleanup(Type ty, Value val,
   }
 
   if (sol::isBytesLikeType(ty)) {
-    unsigned byteSize = sol::getBytesSize(ty);
+    unsigned byteSize = sol::getNumBytes(ty);
     if (byteSize == 32)
       return val;
 
@@ -1440,7 +1453,7 @@ Value evm::Builder::genPackedStorageAddr(Value baseSlot, Value idx, Type eltTy,
   mlir::solgen::BuilderExt bExt(b, loc);
 
   auto [slot, byteOffset] = genPackedStorageAddrPair(
-      baseSlot, idx, sol::getStorageByteSize(eltTy), isDataLeftAligned, loc);
+      baseSlot, idx, sol::getNumBytes(eltTy), isDataLeftAligned, loc);
   return bExt.genLLVMStruct({slot, byteOffset});
 }
 
@@ -1478,7 +1491,7 @@ Value evm::Builder::genCleanupPackedStorageValue(
   mlir::solgen::BuilderExt bExt(b, loc);
 
   if (sol::isBytesLikeType(eltTy)) {
-    unsigned numBits = sol::getBytesSize(eltTy) * 8;
+    unsigned numBits = sol::getNumBytes(eltTy) * 8;
     if (numBits == 256)
       return value;
     return b.create<yul::ArithShlOp>(loc, value,
@@ -1812,7 +1825,7 @@ Value evm::Builder::genStorageArraySlotCount(Value len, Type eltTy,
 
   if (sol::canBePacked(eltTy)) {
     // Multiple elements share a slot: ceil(len / elemsPerSlot).
-    unsigned byteSize = sol::getStorageByteSize(eltTy);
+    unsigned byteSize = sol::getNumBytes(eltTy);
     unsigned elemsPerSlot = 32 / byteSize;
     Value padded =
         b.create<yul::AddOp>(loc, len, bExt.genI256Const(elemsPerSlot - 1));
@@ -1840,7 +1853,7 @@ void evm::Builder::genClearStorageArrayTail(Value arraySlot,
   Type eltTy = arrTy.getEltType();
   // Multiple elements share one slot when byteSize <= 16 (elemsPerSlot >= 2).
   bool trulyPacked =
-      sol::canBePacked(eltTy) && sol::getStorageByteSize(eltTy) <= 16;
+      sol::canBePacked(eltTy) && sol::getNumBytes(eltTy) <= 16;
 
   yul::IfOp ifClear = nullptr;
   if (!isDecrement) {
@@ -1944,7 +1957,7 @@ void evm::Builder::genClearStorageArrayTail(Value arraySlot,
     // partially occupied by still-valid elements. The upper bytes belonging to
     // the removed elements must be zeroed while the lower bytes are preserved.
     if (trulyPacked) {
-      unsigned byteSize = sol::getStorageByteSize(eltTy);
+      unsigned byteSize = sol::getNumBytes(eltTy);
       unsigned elemsPerSlot = 32 / byteSize;
       Value remainder = b.create<yul::ArithModOp>(
           loc, startIdx, bExt.genI256Const(elemsPerSlot));
@@ -2462,13 +2475,13 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
     Type dstEltTy = dstArrTy.getEltType();
 
     unsigned srcEltByteSize =
-        sol::canBePacked(srcEltTy) ? sol::getStorageByteSize(srcEltTy) : 0;
+        sol::canBePacked(srcEltTy) ? sol::getNumBytes(srcEltTy) : 0;
     unsigned dstEltByteSize =
-        sol::canBePacked(dstEltTy) ? sol::getStorageByteSize(dstEltTy) : 0;
+        sol::canBePacked(dstEltTy) ? sol::getNumBytes(dstEltTy) : 0;
     bool srcPacked =
-        sol::canBePacked(srcEltTy) && sol::getStorageByteSize(srcEltTy) <= 16;
+        sol::canBePacked(srcEltTy) && sol::getNumBytes(srcEltTy) <= 16;
     bool dstPacked =
-        sol::canBePacked(dstEltTy) && sol::getStorageByteSize(dstEltTy) <= 16;
+        sol::canBePacked(dstEltTy) && sol::getNumBytes(dstEltTy) <= 16;
 
     // Packed element types require specialised loops when storage is involved.
 
@@ -2476,8 +2489,7 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
     if (srcIsStorage && dstIsStorage) {
       // Identical layout on both sides: raw slot copy.
       if (srcPacked && dstPacked &&
-          (sol::getStorageByteSize(srcEltTy) ==
-           sol::getStorageByteSize(dstEltTy))) {
+          (sol::getNumBytes(srcEltTy) == sol::getNumBytes(dstEltTy))) {
         unsigned itemsPerSlot = 32 / dstEltByteSize;
         Value numSlots = b.create<yul::ArithDivOp>(
             loc,
@@ -2641,7 +2653,7 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
     // boundary.
     Value val = genLoad(srcAddr, srcDataLoc, loc);
     if (sol::isBytesLikeType(dstTy)) {
-      unsigned shift = (32 - sol::getBytesSize(dstTy)) * 8;
+      unsigned shift = (32 - sol::getNumBytes(dstTy)) * 8;
       if (!srcIsStorage && dstIsStorage && shift > 0)
         val = b.create<yul::ArithShrOp>(loc, val, bExt.genI256Const(shift));
       else if (srcIsStorage && !dstIsStorage && shift > 0)
@@ -2688,190 +2700,51 @@ void evm::Builder::genABITupleSizeAssert(TypeRange tys, Value tupleSize,
                         loc);
 }
 
-Value evm::Builder::genABITupleEncoding(
-    Type ty, Value src, Value dstAddr, bool dstAddrInTail, Value tupleStart,
-    Value tailAddr, std::optional<Location> locArg,
-    std::optional<sol::DataLocation> srcDataLoc, bool includeLengthPrefix) {
-  Location loc = locArg ? *locArg : defLoc;
+Value evm::Builder::genABIEncodingImpl(
+    Type ty, Value src, Value dstAddr, ABIEncodingOptions opts,
+    bool dstAddrInTail, Value tupleStart, Value tailAddr, Location loc,
+    std::optional<sol::DataLocation> srcDataLoc) {
   mlir::solgen::BuilderExt bExt(b, loc);
 
-  if (isa<IntegerType>(ty) || isa<sol::EnumType>(ty) ||
-      sol::isAddressLikeType(ty) || isa<sol::FixedBytesType>(ty) ||
-      isa<sol::ExtFuncRefType>(ty)) {
-    src = genCleanup(ty, src, loc, srcDataLoc);
-    b.create<yul::MStoreOp>(loc, dstAddr, src);
+  // Scalar
+  if (sol::isScalar(ty)) {
+    unsigned numBytes = sol::getNumBytes(ty);
+    Value cleaned = genCleanup(ty, src, loc, srcDataLoc);
+    // Right-aligned types need a left-shift in packed mode so their bytes
+    // land at the low memory address after mstore.
+    if (!opts.padded && !sol::isLeftAligned(ty) && numBytes < 32)
+      cleaned = b.create<yul::ArithShlOp>(
+          loc, cleaned, bExt.genI256Const(256 - numBytes * 8));
+    b.create<yul::MStoreOp>(loc, dstAddr, cleaned);
+    if (opts.dynamicInplace)
+      return b.create<yul::AddOp>(
+          loc, dstAddr, bExt.genI256Const(opts.padded ? 32 : numBytes));
     return tailAddr;
   }
 
-  // Array type
-  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
-    Value thirtyTwo = bExt.genI256Const(32);
-    Value dstArrAddr, srcArrAddr, size;
-    Type eltTy = arrTy.getEltType();
-    auto dataLoc = arrTy.getDataLocation();
-    if (arrTy.isDynSized()) {
-      // Generate the size store.
-      Value i256Size = genDynSize(src, arrTy, loc);
-      if (dataLoc == sol::DataLocation::CallData &&
-          canFastCopyCalldataArray(eltTy)) {
-        unsigned stride = getCallDataHeadSize(eltTy);
-        APInt maxLength = APInt::getAllOnes(256).udiv(APInt(256, stride));
-        Value tooLongCond = bExt.genCmp(yul::CmpPredicate::ugt, i256Size,
-                                        bExt.genI256Const(maxLength));
-        genDebugRevertWithMsg(tooLongCond, "ABI encoding: array data too long",
-                              loc);
-      }
-      assert(dstAddr == tailAddr);
-      if (includeLengthPrefix)
-        b.create<yul::MStoreOp>(loc, dstAddr, i256Size);
-
-      size = i256Size;
-      dstArrAddr = includeLengthPrefix
-                       ? b.create<yul::AddOp>(loc, dstAddr, thirtyTwo)
-                       : dstAddr;
-      srcArrAddr = genDataAddrPtr(src, arrTy, loc);
-
-      // Generate the tail address update.
-      Value sizeInBytes = b.create<yul::MulOp>(
-          loc, i256Size, bExt.genI256Const(getCallDataHeadSize(eltTy)));
-      tailAddr = b.create<yul::AddOp>(loc, dstArrAddr, sizeInBytes);
-    } else {
-      size = bExt.genI256Const(arrTy.getSize());
-      dstArrAddr = dstAddr;
-      srcArrAddr = src;
-
-      if (dstAddrInTail) {
-        // Generate the tail address update.
-        Value i256Size = bExt.genI256Const(arrTy.getSize());
-        Value sizeInBytes = b.create<yul::MulOp>(
-            loc, i256Size, bExt.genI256Const(getCallDataHeadSize(eltTy)));
-        tailAddr = b.create<yul::AddOp>(loc, dstArrAddr, sizeInBytes);
-      }
-    }
-
-    Value dstStride = bExt.genI256Const(getCallDataHeadSize(eltTy));
-    auto emitArrayElementEncodingLoop = [&](Value srcStride,
-                                            auto &&materializeSrcVal) {
-      auto forOp = bExt.createCountedLoop(
-          bExt.genI256Const(0), size, bExt.genI256Const(1),
-          ValueRange{dstArrAddr, srcArrAddr, tailAddr},
-          [&](OpBuilder &b, Location loc, Value, ValueRange initArgs) {
-            Value iDstAddr = initArgs[0];
-            Value iSrcAddr = initArgs[1];
-            Value iTailAddr = initArgs[2];
-
-            Value srcVal = materializeSrcVal(loc, iSrcAddr);
-            Value nextTailAddr;
-            if (sol::hasDynamicallySizedElt(eltTy)) {
-              b.create<yul::MStoreOp>(
-                  loc, iDstAddr,
-                  b.create<yul::SubOp>(loc, iTailAddr, dstArrAddr));
-              assert(dstAddrInTail);
-              nextTailAddr =
-                  genABITupleEncoding(eltTy, srcVal, iTailAddr, dstAddrInTail,
-                                      tupleStart, iTailAddr, loc, dataLoc);
-            } else {
-              nextTailAddr =
-                  genABITupleEncoding(eltTy, srcVal, iDstAddr, dstAddrInTail,
-                                      tupleStart, iTailAddr, loc, dataLoc);
-            }
-
-            return SmallVector<Value>{
-                b.create<yul::AddOp>(loc, iDstAddr, dstStride),
-                b.create<yul::AddOp>(loc, iSrcAddr, srcStride), nextTailAddr};
-          });
-      return forOp.getResult(3);
-    };
-
-    // Memory arrays are traversed linearly, one loaded word per element.
-    if (dataLoc == sol::DataLocation::Memory)
-      return emitArrayElementEncodingLoop(
-          thirtyTwo, [&](Location loc, Value iSrcAddr) {
-            return genLoad(iSrcAddr, dataLoc, loc);
-          });
-
-    // Calldata array traversal is layout-dependent.
-    if (dataLoc == sol::DataLocation::CallData) {
-      // Copy contiguous calldata payload in one operation.
-      if (canFastCopyCalldataArray(eltTy)) {
-        Value sizeInBytes = b.create<yul::MulOp>(
-            loc, size, bExt.genI256Const(getCallDataHeadSize(eltTy)));
-        b.create<yul::CallDataCopyOp>(loc, dstArrAddr, srcArrAddr, sizeInBytes);
-        return tailAddr;
-      }
-
-      // Dynamic elements keep offset-based handling (load offset from head).
-      if (sol::hasDynamicallySizedElt(eltTy))
-        return emitArrayElementEncodingLoop(
-            thirtyTwo, [&](Location loc, Value iSrcAddr) {
-              // Each fixed-array head slot stores a relative calldata offset,
-              // so resolve it against the array head before recursing.
-              return genCalldataAccessRef(eltTy, srcArrAddr, iSrcAddr,
-                                          /*isNonABI=*/false, loc);
-            });
-
-      // Static aggregate/non-pointer-ref elements in calldata are forwarded by
-      // element head address and advanced by calldata head size.
-      if (sol::isNonPtrRefType(eltTy))
-        return emitArrayElementEncodingLoop(
-            bExt.genI256Const(getCallDataHeadSize(eltTy)),
-            [&](Location, Value iSrcAddr) { return iSrcAddr; });
-
-      // Scalar-like calldata elements are loaded one word per step with
-      // +32-byte source progression.
-      return emitArrayElementEncodingLoop(
-          thirtyTwo, [&](Location loc, Value iSrcAddr) {
-            return genLoad(iSrcAddr, dataLoc, loc);
-          });
-    }
-
-    // All remaining array sources here are storage-backed.
-    assert(dataLoc == sol::DataLocation::Storage &&
-           "Expected storage data location");
-
-    // Storage arrays with reference-typed elements pass per-element storage
-    // slot addresses to recursive encoders.
-    if (sol::isNonPtrRefType(eltTy))
-      return emitArrayElementEncodingLoop(
-          bExt.genI256Const(sol::getStorageSlotCount(eltTy)),
-          [&](Location, Value iSrcAddr) { return iSrcAddr; });
-
-    if (sol::canBePacked(eltTy) && sol::getStorageByteSize(eltTy) <= 16)
-      // Storage arrays with value-typed elements.
-      emitCompactStorageArrayReadLoop(
-          b, loc, size, dstArrAddr, srcArrAddr, dstStride,
-          sol::getStorageByteSize(eltTy), arrTy.isDynSized(),
-          [&](OpBuilder &builder, Location loc, Value slotValue,
-              Value shiftBits, Value iDstAddr) {
-            Value shifted =
-                builder.create<yul::ArithShrOp>(loc, slotValue, shiftBits);
-            Value srcVal = genCleanupPackedStorageValue(eltTy, shifted, loc);
-            (void)genABITupleEncoding(eltTy, srcVal, iDstAddr, dstAddrInTail,
-                                      tupleStart, tailAddr, loc, dataLoc);
-          });
-    else
-      // Non-packed storage value elements are loaded linearly using slot
-      // stride.
-      emitLinearArrayLoop(
-          b, loc, size, dstArrAddr, srcArrAddr, dstStride,
-          bExt.genI256Const(sol::getStorageSlotCount(eltTy)),
-          [&](OpBuilder &, Location loc, Value iSrcAddr, Value iDstAddr) {
-            Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
-            (void)genABITupleEncoding(eltTy, srcVal, iDstAddr, dstAddrInTail,
-                                      tupleStart, tailAddr, loc, dataLoc);
-          });
-    return tailAddr;
+  // String
+  if (isa<sol::StringType>(ty)) {
+    Value dataAddr =
+        opts.dynamicInplace
+            ? dstAddr
+            : b.create<yul::AddOp>(loc, tailAddr, bExt.genI256Const(32));
+    Value size = genCopyStringDataToMemory(src, ty, dataAddr, loc,
+                                           /*withCleanup=*/true);
+    if (!opts.dynamicInplace)
+      b.create<yul::MStoreOp>(loc, tailAddr, size);
+    Value advanceBy = opts.padded ? bExt.genRoundUpToMultiple<32>(size) : size;
+    return b.create<yul::AddOp>(loc, dataAddr, advanceBy);
   }
 
-  // Struct type
+  // Struct
+  // Two emission paths:
+  //   (A) packed single-cursor   -- members written contiguously.
+  //   (B) standard head/tail     -- dynamic members write a tail offset in
+  //                                 their head slot; static members encode
+  //                                 in place at the head.
+  // Members are always 32B-padded in either mode (upstream parity).
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
-    // If the struct itself is emitted into tail, initialize the struct-local
-    // tail to just past its ABI head.
-    if (dstAddrInTail)
-      tailAddr = b.create<yul::AddOp>(
-          loc, dstAddr,
-          bExt.genI256Const(getStructCalldataEncodedTailSize(structTy)));
-
+    // ---- Shared setup: member reader + member sub-options. -------------
     auto dataLoc = structTy.getDataLocation();
     std::unique_ptr<StructEncodeMemberReader> reader;
     switch (dataLoc) {
@@ -2891,28 +2764,49 @@ Value evm::Builder::genABITupleEncoding(
       llvm_unreachable("Unexpected data location for struct encoding");
     }
 
-    Value structHeadAddr = dstAddr;
     auto memberTypes = structTy.getMemberTypes();
+    ABIEncodingOptions memSub = opts;
+    memSub.padded = true;
+
+    // ---- Path (A): packed single-cursor. -------------------------------
+    if (opts.dynamicInplace) {
+      Value curAddr = dstAddr;
+      for (uint64_t i = 0, e = memberTypes.size(); i < e; ++i) {
+        Type memTy = memberTypes[i];
+        Value srcVal = reader->read(i);
+        curAddr = genABIEncodingImpl(memTy, srcVal, curAddr, memSub,
+                                     /*dstAddrInTail=*/true,
+                                     /*tupleStart=*/curAddr,
+                                     /*tailAddr=*/curAddr, loc, dataLoc);
+        if (i + 1 < e)
+          reader->advance(i);
+      }
+      return curAddr;
+    }
+
+    // ---- Path (B): standard head/tail. ---------------------------------
+    if (dstAddrInTail)
+      tailAddr = b.create<yul::AddOp>(
+          loc, dstAddr,
+          bExt.genI256Const(getStructCalldataEncodedTailSize(structTy)));
+
+    Value structHeadAddr = dstAddr;
     for (uint64_t i = 0, e = memberTypes.size(); i < e; ++i) {
       Type memTy = memberTypes[i];
       Value srcVal = reader->read(i);
 
       if (sol::hasDynamicallySizedElt(memTy)) {
-        // Dynamic members store a tail offset in the head, then encode payload
-        // at the current tail.
         b.create<yul::MStoreOp>(loc, structHeadAddr,
                                 b.create<yul::SubOp>(loc, tailAddr, dstAddr));
-        tailAddr =
-            genABITupleEncoding(memTy, srcVal, tailAddr, /*dstAddrInTail=*/true,
-                                dstAddr, tailAddr, loc, dataLoc);
+        tailAddr = genABIEncodingImpl(memTy, srcVal, tailAddr, memSub,
+                                      /*dstAddrInTail=*/true, dstAddr, tailAddr,
+                                      loc, dataLoc);
       } else {
-        // Static members never advance the tail on their own.
-        tailAddr = genABITupleEncoding(memTy, srcVal, structHeadAddr,
-                                       /*dstAddrInTail=*/false, dstAddr,
-                                       tailAddr, loc, dataLoc);
+        tailAddr = genABIEncodingImpl(memTy, srcVal, structHeadAddr, memSub,
+                                      /*dstAddrInTail=*/false, dstAddr,
+                                      tailAddr, loc, dataLoc);
       }
 
-      // Advance the addresses iff there are more members to encode.
       if (i + 1 < e) {
         structHeadAddr = b.create<yul::AddOp>(
             loc, structHeadAddr, bExt.genI256Const(getCallDataHeadSize(memTy)));
@@ -2922,33 +2816,219 @@ Value evm::Builder::genABITupleEncoding(
     return tailAddr;
   }
 
-  // String type
-  if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
-    auto tailDataAddr =
-        b.create<yul::AddOp>(loc, tailAddr, bExt.genI256Const(32));
+  // Array
+  // Four emission paths, in dispatch order:
+  //   (A) whole-array CallDataCopy     -- scalar-element calldata array
+  //                                       whose payload is 32B-padded.
+  //   (B) specialized storage loops    -- value-typed storage arrays
+  //                                       (compact or linear).
+  //   (C) packed single-cursor loop    -- packed mode (catch-all for
+  //                                       packed encoding).
+  //   (D) generic head/tail loop       -- standard mode (catch-all).
+  // `loadElt` reads the source element for (C) and (D); (A) and (B) read
+  // the source directly.
+  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
+    Type eltTy = arrTy.getEltType();
+    auto dataLoc = arrTy.getDataLocation();
 
-    // Generate the data copy.
-    Value size = genCopyStringDataToMemory(src, ty, tailDataAddr, loc,
-                                           /*withCleanup=*/true);
-    // Generate the length field copy.
-    b.create<yul::MStoreOp>(loc, tailAddr, size);
-    return b.create<yul::AddOp>(loc, tailDataAddr,
-                                bExt.genRoundUpToMultiple<32>(size));
+    // `srcArrAddr` is assigned by each path that uses `loadElt` before
+    // invoking it; `loadElt` captures it by reference.
+    Value srcArrAddr, size;
+
+    // Reads the element at `srcAddr` and yields the value passed to the
+    // recursive encoder.
+    auto loadElt = [&](Location loc, Value srcAddr) -> Value {
+      if (dataLoc == sol::DataLocation::Memory)
+        return genLoad(srcAddr, dataLoc, loc);
+      if (dataLoc == sol::DataLocation::CallData) {
+        if (sol::hasDynamicallySizedElt(eltTy))
+          return genCalldataAccessRef(eltTy, srcArrAddr, srcAddr,
+                                      /*isNonABI=*/false, loc);
+        if (sol::isNonPtrRefType(eltTy))
+          return srcAddr;
+        return genLoad(srcAddr, dataLoc, loc);
+      }
+      assert(dataLoc == sol::DataLocation::Storage &&
+             sol::isNonPtrRefType(eltTy));
+      return srcAddr;
+    };
+
+    // ---- Shared setup: size, srcArrAddr, dstArrAddr, dstStride, tailAddr.
+    // Path C doesn't use dstStride: its single-cursor loop advances by the
+    // recursive call's return (variable per element), not by a fixed stride.
+    if (arrTy.isDynSized()) {
+      size = genDynSize(src, arrTy, loc);
+      srcArrAddr = genDataAddrPtr(src, arrTy, loc);
+    } else {
+      size = bExt.genI256Const(arrTy.getSize());
+      srcArrAddr = src;
+    }
+
+    Value dstArrAddr;
+    // Length prefix: only standard-mode dynamic arrays carry one.
+    if (arrTy.isDynSized() && !opts.dynamicInplace) {
+      assert(dstAddr == tailAddr);
+      b.create<yul::MStoreOp>(loc, dstAddr, size);
+      dstArrAddr = b.create<yul::AddOp>(loc, dstAddr, bExt.genI256Const(32));
+    } else {
+      dstArrAddr = dstAddr;
+    }
+
+    Value dstStride = bExt.genI256Const(getCallDataHeadSize(eltTy));
+
+    if (arrTy.isDynSized() || dstAddrInTail) {
+      Value sizeInBytes = b.create<yul::MulOp>(loc, size, dstStride);
+      tailAddr = b.create<yul::AddOp>(loc, dstArrAddr, sizeInBytes);
+    }
+
+    // ---- Path (A): whole-array CallDataCopy. ---------------------------
+    if (dataLoc == sol::DataLocation::CallData &&
+        canFastCopyCalldataArray(eltTy)) {
+      if (arrTy.isDynSized()) {
+        unsigned stride = getCallDataHeadSize(eltTy);
+        APInt maxLength = APInt::getAllOnes(256).udiv(APInt(256, stride));
+        Value tooLongCond = bExt.genCmp(yul::CmpPredicate::ugt, size,
+                                        bExt.genI256Const(maxLength));
+        genDebugRevertWithMsg(tooLongCond, "ABI encoding: array data too long",
+                              loc);
+      }
+      Value sizeInBytes = b.create<yul::MulOp>(loc, size, dstStride);
+      b.create<yul::CallDataCopyOp>(loc, dstArrAddr, srcArrAddr, sizeInBytes);
+      return tailAddr;
+    }
+
+    // ---- Path (B): specialized storage loops. --------------------------
+    if (dataLoc == sol::DataLocation::Storage && sol::isScalar(eltTy)) {
+      ABIEncodingOptions sub = opts;
+      sub.padded = true;
+      if (sol::getNumBytes(eltTy) <= 16)
+        emitCompactStorageArrayReadLoop(
+            b, loc, size, dstArrAddr, srcArrAddr, dstStride,
+            sol::getNumBytes(eltTy), arrTy.isDynSized(),
+            [&](OpBuilder &builder, Location loc, Value slotValue,
+                Value shiftBits, Value iDstAddr) {
+              Value shifted =
+                  builder.create<yul::ArithShrOp>(loc, slotValue, shiftBits);
+              Value srcVal = genCleanupPackedStorageValue(eltTy, shifted, loc);
+              genABIEncodingImpl(eltTy, srcVal, iDstAddr, sub, dstAddrInTail,
+                                 tupleStart, tailAddr, loc, dataLoc);
+            });
+      else
+        emitLinearArrayLoop(
+            b, loc, size, dstArrAddr, srcArrAddr, dstStride,
+            bExt.genI256Const(sol::getStorageSlotCount(eltTy)),
+            [&](OpBuilder &, Location loc, Value iSrcAddr, Value iDstAddr) {
+              Value srcVal = genLoad(iSrcAddr, dataLoc, loc);
+              genABIEncodingImpl(eltTy, srcVal, iDstAddr, sub, dstAddrInTail,
+                                 tupleStart, tailAddr, loc, dataLoc);
+            });
+      return tailAddr;
+    }
+
+    Value srcStride = bExt.genI256Const(getArrayEltStride(arrTy));
+
+    // ---- Path (C): packed single-cursor loop. --------------------------
+    if (opts.dynamicInplace) {
+      ABIEncodingOptions sub = opts;
+      sub.padded = true;
+      auto forOp = bExt.createCountedLoop(
+          bExt.genI256Const(0), size, bExt.genI256Const(1),
+          ValueRange{dstArrAddr, srcArrAddr},
+          [&](OpBuilder &nb, Location nloc, Value, ValueRange initArgs) {
+            Value iDstAddr = initArgs[0];
+            Value iSrcAddr = initArgs[1];
+            Value srcVal = loadElt(nloc, iSrcAddr);
+            // Single-cursor recursion: head/tail bookkeeping is unused, so
+            // pass geometrically consistent values pinned at iDstAddr.
+            Value nextDst = genABIEncodingImpl(
+                eltTy, srcVal, iDstAddr, sub, /*dstAddrInTail=*/true,
+                /*tupleStart=*/iDstAddr, /*tailAddr=*/iDstAddr, nloc, dataLoc);
+            Value nextSrc = nb.create<yul::AddOp>(nloc, iSrcAddr, srcStride);
+            return SmallVector<Value>{nextDst, nextSrc};
+          });
+      return forOp.getResult(1);
+    }
+
+    // ---- Path (D): generic head/tail per-element loop. -----------------
+    auto forOp = bExt.createCountedLoop(
+        bExt.genI256Const(0), size, bExt.genI256Const(1),
+        ValueRange{dstArrAddr, srcArrAddr, tailAddr},
+        [&](OpBuilder &b, Location loc, Value, ValueRange initArgs) {
+          Value iDstAddr = initArgs[0];
+          Value iSrcAddr = initArgs[1];
+          Value iTailAddr = initArgs[2];
+
+          Value srcVal = loadElt(loc, iSrcAddr);
+          Value nextTailAddr;
+          ABIEncodingOptions sub = opts;
+          sub.padded = true;
+          if (sol::hasDynamicallySizedElt(eltTy)) {
+            b.create<yul::MStoreOp>(
+                loc, iDstAddr,
+                b.create<yul::SubOp>(loc, iTailAddr, dstArrAddr));
+            assert(dstAddrInTail);
+            nextTailAddr =
+                genABIEncodingImpl(eltTy, srcVal, iTailAddr, sub, dstAddrInTail,
+                                   tupleStart, iTailAddr, loc, dataLoc);
+          } else {
+            nextTailAddr =
+                genABIEncodingImpl(eltTy, srcVal, iDstAddr, sub, dstAddrInTail,
+                                   tupleStart, iTailAddr, loc, dataLoc);
+          }
+
+          return SmallVector<Value>{
+              b.create<yul::AddOp>(loc, iDstAddr, dstStride),
+              b.create<yul::AddOp>(loc, iSrcAddr, srcStride), nextTailAddr};
+        });
+    return forOp.getResult(3);
   }
 
   llvm_unreachable("NYI");
 }
 
-Value evm::Builder::genABITupleEncoding(TypeRange tys, ValueRange vals,
-                                        Value tupleStart,
-                                        std::optional<mlir::Location> locArg) {
+Value evm::Builder::genABIEncoding(TypeRange tys, ValueRange vals,
+                                   Value startAddr,
+                                   std::optional<mlir::Location> locArg) {
+  ABIEncodingOptions opts;
+  opts.padded = true;
+  opts.dynamicInplace = false;
+  return genABIEncoding(tys, vals, startAddr, opts, locArg);
+}
+
+Value evm::Builder::genABIEncodingPacked(TypeRange tys, ValueRange vals,
+                                         Value startAddr,
+                                         std::optional<mlir::Location> locArg) {
+  ABIEncodingOptions opts;
+  opts.padded = false;
+  opts.dynamicInplace = true;
+  return genABIEncoding(tys, vals, startAddr, opts, locArg);
+}
+
+Value evm::Builder::genABIEncoding(TypeRange tys, ValueRange vals,
+                                   Value startAddr, ABIEncodingOptions opts,
+                                   std::optional<mlir::Location> locArg) {
   Location loc = locArg ? *locArg : defLoc;
   mlir::solgen::BuilderExt bExt(b, loc);
 
+  // Packed (single linear cursor): walk values sequentially.
+  if (opts.dynamicInplace) {
+    Value curAddr = startAddr;
+    for (auto [ty, val] : llvm::zip(tys, vals))
+      curAddr = genABIEncodingImpl(ty, val, curAddr, opts,
+                                   /*dstAddrInTail=*/true,
+                                   /*tupleStart=*/curAddr,
+                                   /*tailAddr=*/curAddr, loc,
+                                   /*srcDataLoc=*/std::nullopt);
+    return curAddr;
+  }
+
+  // Standard mode (head/tail layout): compute head end and walk with
+  // head/tail bookkeeping.
   unsigned totCallDataHeadSz = 0;
   for (Type ty : tys)
     totCallDataHeadSz += getCallDataHeadSize(ty);
 
+  Value tupleStart = startAddr;
   Value headAddr = tupleStart;
   Value tailAddr = b.create<yul::AddOp>(loc, tupleStart,
                                         bExt.genI256Const(totCallDataHeadSz));
@@ -2958,11 +3038,13 @@ Value evm::Builder::genABITupleEncoding(TypeRange tys, ValueRange vals,
     if (sol::hasDynamicallySizedElt(ty)) {
       b.create<yul::MStoreOp>(loc, headAddr,
                               b.create<yul::SubOp>(loc, tailAddr, tupleStart));
-      tailAddr = genABITupleEncoding(ty, val, tailAddr, /*dstAddrInTail=*/true,
-                                     tupleStart, tailAddr);
+      tailAddr = genABIEncodingImpl(ty, val, tailAddr, opts,
+                                    /*dstAddrInTail=*/true, tupleStart,
+                                    tailAddr, loc, /*srcDataLoc=*/std::nullopt);
     } else {
-      tailAddr = genABITupleEncoding(ty, val, headAddr, /*dstAddrInTail=*/false,
-                                     tupleStart, tailAddr);
+      tailAddr = genABIEncodingImpl(ty, val, headAddr, opts,
+                                    /*dstAddrInTail=*/false, tupleStart,
+                                    tailAddr, loc, /*srcDataLoc=*/std::nullopt);
     }
     headAddr = b.create<yul::AddOp>(loc, headAddr,
                                     bExt.genI256Const(getCallDataHeadSize(ty)));
@@ -2987,108 +3069,6 @@ Value evm::Builder::genABITupleEncoding(std::string const &str, Value headStart,
       32 + mlir::solgen::getRoundUpToMultiple<32>(str.length()));
 
   return b.create<yul::AddOp>(loc, tailAddr, stringSize);
-}
-
-Value evm::Builder::genABIPackedEncoding(Type ty, Value val, Value addr,
-                                         std::optional<Location> locArg) {
-  Location loc = locArg ? *locArg : defLoc;
-  mlir::solgen::BuilderExt bExt(b, loc);
-
-  // Integer type.
-  if (auto intTy = dyn_cast<IntegerType>(ty)) {
-    unsigned bitWidth = intTy.getWidth();
-    bool isBool = (bitWidth == 1);
-    assert((isBool || bitWidth % 8 == 0) &&
-           "Expected bool or byte-aligned integers");
-
-    // bool is stored as uint8 in packed encoding.
-    unsigned byteSize = isBool ? 1 : bitWidth / 8;
-    Value cleaned = genCleanup(intTy, val, loc);
-    if (byteSize < 32)
-      cleaned = b.create<yul::ArithShlOp>(
-          loc, cleaned, bExt.genI256Const(256 - byteSize * 8));
-
-    b.create<yul::MStoreOp>(loc, addr, cleaned);
-    return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(byteSize));
-  }
-
-  // Enum type.
-  if (auto enumTy = dyn_cast<sol::EnumType>(ty)) {
-    assert(enumTy.getMax() <= 255 &&
-           "Expected enums with at most 256 elements");
-    Value cleaned = genCleanup(enumTy, val, loc);
-    Value shifted =
-        b.create<yul::ArithShlOp>(loc, cleaned, bExt.genI256Const(248));
-    b.create<yul::MStoreOp>(loc, addr, shifted);
-    return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(1));
-  }
-
-  // Address type.
-  if (sol::isAddressLikeType(ty)) {
-    Value cleaned = genCleanup(ty, val, loc);
-    Value shifted =
-        b.create<yul::ArithShlOp>(loc, cleaned, bExt.genI256Const(96));
-    b.create<yul::MStoreOp>(loc, addr, shifted);
-    return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(20));
-  }
-
-  // Bytes type.
-  if (auto bytesTy = dyn_cast<sol::FixedBytesType>(ty)) {
-    Value cleaned = genCleanup(bytesTy, val, loc);
-    b.create<yul::MStoreOp>(loc, addr, cleaned);
-    return b.create<yul::AddOp>(loc, addr,
-                                bExt.genI256Const(bytesTy.getSize()));
-  }
-
-  // External function ref.
-  if (isa<sol::ExtFuncRefType>(ty)) {
-    Value cleaned = genCleanup(ty, val, loc);
-    b.create<yul::MStoreOp>(loc, addr, cleaned);
-    return b.create<yul::AddOp>(loc, addr, bExt.genI256Const(24));
-  }
-
-  // String type.
-  if (auto stringTy = dyn_cast<sol::StringType>(ty)) {
-    Value dataLen =
-        genCopyStringDataToMemory(val, ty, addr, loc, /*withCleanup=*/true);
-    return b.create<yul::AddOp>(loc, addr, dataLen);
-  }
-
-  // Array type.
-  if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
-    auto isValidPackedArrayElementType = [&](Type eltTy) {
-      while (auto nestedArrTy = dyn_cast<sol::ArrayType>(eltTy)) {
-        if (nestedArrTy.isDynSized())
-          return false;
-        eltTy = nestedArrTy.getEltType();
-      }
-      return isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
-             isa<sol::FixedBytesType>(eltTy) ||
-             isa<sol::ExtFuncRefType>(eltTy) || sol::isAddressLikeType(eltTy);
-    };
-
-    // TODO: Move packed array element type validation to a verifier.
-    if (!isValidPackedArrayElementType(arrTy.getEltType()))
-      llvm_unreachable(
-          "Only scalar types and fixed nested arrays can be packed");
-
-    return genABITupleEncoding(
-        arrTy, val, addr, /*dstAddrInTail=*/true, /*tupleStart=*/addr,
-        /*tailAddr=*/addr, loc, /*srcDataLoc=*/std::nullopt,
-        /*includeLengthPrefix=*/false);
-  }
-
-  llvm_unreachable("NYI: packed encoding of this type");
-}
-
-Value evm::Builder::genABIPackedEncoding(TypeRange tys, ValueRange vals,
-                                         Value addr,
-                                         std::optional<Location> locArg) {
-  Location loc = locArg ? *locArg : defLoc;
-  Value curAddr = addr;
-  for (auto [ty, val] : llvm::zip(tys, vals))
-    curAddr = genABIPackedEncoding(ty, val, curAddr, loc);
-  return curAddr;
 }
 
 Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
@@ -3389,7 +3369,7 @@ void evm::Builder::genRevert(TypeRange tys, ValueRange vals,
   b.create<yul::MStoreOp>(loc, selectorAddr, bExt.genI256Selector(signature));
   Value tupleStart =
       b.create<yul::AddOp>(loc, selectorAddr, bExt.genI256Const(4));
-  Value tupleEnd = genABITupleEncoding(tys, vals, tupleStart, loc);
+  Value tupleEnd = genABIEncoding(tys, vals, tupleStart, loc);
   Value size = b.create<yul::SubOp>(loc, tupleEnd, selectorAddr);
   b.create<yul::RevertOp>(loc, selectorAddr, size);
 }

@@ -45,10 +45,6 @@ bool isDynamicallySized(Type ty);
 /// dynamically sized.
 bool hasDynamicallySizedElt(Type ty);
 
-/// Returns true if the type is a reference type (not exactly solidity's
-/// reference types).
-bool isRefType(Type ty);
-
 /// Returns true if the type is a reference type but not a pointer type.
 bool isNonPtrRefType(Type ty);
 
@@ -67,11 +63,12 @@ bool isAddressLikeType(Type ty);
 /// Return true if the type is bytes-like (i.e. fixedbytes or byte).
 bool isBytesLikeType(Type ty);
 
-/// Return the byte size of a bytes-like type.
-unsigned getBytesSize(Type ty);
-
 /// MLIR version of solidity ast's Type::storageSize().
 unsigned getStorageSlotCount(Type ty);
+
+/// Returns true if `ty` is a scalar value type: Integer, Enum, FuncRef,
+/// ExtFuncRef, AddressLike, or BytesLike (FixedBytes / ByteType).
+bool isScalar(mlir::Type ty);
 
 /// Returns true if the type can be packed within a storage slot.
 /// Packable types (scalars) need {slot, offset} representation.
@@ -79,8 +76,9 @@ unsigned getStorageSlotCount(Type ty);
 /// need slot.
 bool canBePacked(mlir::Type ty);
 
-/// Returns the byte size of a packable type in storage.
-unsigned getStorageByteSize(mlir::Type ty);
+/// Returns the byte width of a packable scalar type (its size when not
+/// 32B-padded). Used by both storage layout and ABI packed encoding.
+unsigned getNumBytes(mlir::Type ty);
 
 ///
 /// The following functions are used to query the capabilities of the specified
