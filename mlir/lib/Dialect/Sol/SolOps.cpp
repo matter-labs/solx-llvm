@@ -149,12 +149,12 @@ bool BytesCastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
   // int -> bytes.
   if (auto inpIntTy = dyn_cast<IntegerType>(inpTy)) {
     return sol::isBytesLikeType(outTy) &&
-           inpIntTy.getWidth() == sol::getBytesSize(outTy) * 8;
+           inpIntTy.getWidth() == sol::getNumBytes(outTy) * 8;
   }
 
   // bytes -> int.
   return sol::isBytesLikeType(inpTy) &&
-         sol::getBytesSize(inpTy) * 8 == cast<IntegerType>(outTy).getWidth();
+         sol::getNumBytes(inpTy) * 8 == cast<IntegerType>(outTy).getWidth();
 }
 
 //===----------------------------------------------------------------------===//

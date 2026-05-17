@@ -159,21 +159,16 @@ mlir::SideEffects::Resource *mlir::sol::getResource(DataLocation dataLoc) {
   }
 }
 
-// TODO? Should we exclude sol.pointer from reference types?
-
-bool mlir::sol::isRefType(Type ty) {
-  return isa<ArrayType>(ty) || isa<StringType>(ty) || isa<StructType>(ty) ||
-         isa<PointerType>(ty) || isa<MappingType>(ty);
-}
-
 bool mlir::sol::isNonPtrRefType(Type ty) {
-  return isRefType(ty) && !isa<PointerType>(ty);
+  return !isScalar(ty) && !isa<PointerType>(ty);
 }
 
 bool mlir::sol::isLeftAligned(Type ty) {
-  if (isa<IntegerType>(ty))
-    return false;
-  llvm_unreachable("NYI: isLeftAligned of other types");
+  assert(isScalar(ty) && "Alignment only defined for scalar types");
+  // FixedBytesN / `byte` and ExtFuncRef occupy the high bytes of the
+  // cleaned word; everything else (int / enum / address / FuncRef) is
+  // right-aligned (low bytes).
+  return isBytesLikeType(ty) || isa<ExtFuncRefType>(ty);
 }
 
 bool mlir::sol::isDynamicallySized(Type ty) {
@@ -208,14 +203,6 @@ bool mlir::sol::isBytesLikeType(Type ty) {
   return isa<FixedBytesType, ByteType>(ty);
 }
 
-unsigned mlir::sol::getBytesSize(Type ty) {
-  if (isa<ByteType>(ty))
-    return 1;
-
-  auto fixedBytesTy = cast<FixedBytesType>(ty);
-  return fixedBytesTy.getSize();
-}
-
 unsigned mlir::sol::getStorageSlotCount(Type ty) {
   if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FixedBytesType>(ty) ||
       isa<MappingType>(ty) || isa<FuncRefType>(ty) || isa<ExtFuncRefType>(ty) ||
@@ -233,7 +220,7 @@ unsigned mlir::sol::getStorageSlotCount(Type ty) {
       return size * getStorageSlotCount(eltTy);
 
     // Packed arrays of small elements can fit in fewer slots.
-    return llvm::divideCeil(size, 32u / getStorageByteSize(eltTy));
+    return llvm::divideCeil(size, 32u / getNumBytes(eltTy));
   }
 
   if (auto structTy = dyn_cast<StructType>(ty)) {
@@ -245,29 +232,26 @@ unsigned mlir::sol::getStorageSlotCount(Type ty) {
   llvm_unreachable("NYI: Other types");
 }
 
-bool mlir::sol::canBePacked(Type ty) {
-  // Scalars can be packed within a slot.
-  if (isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FuncRefType>(ty) ||
-      isa<ExtFuncRefType>(ty) || isAddressLikeType(ty) || isBytesLikeType(ty))
-    return true;
-
-  // Aggregates are slot-aligned and cannot be packed.
-  if (isa<ArrayType>(ty) || isa<StructType>(ty) || isa<MappingType>(ty) ||
-      isa<StringType>(ty))
-    return false;
-
-  llvm_unreachable("NYI");
+bool mlir::sol::isScalar(Type ty) {
+  return isa<IntegerType>(ty) || isa<EnumType>(ty) || isa<FuncRefType>(ty) ||
+         isa<ExtFuncRefType>(ty) || isAddressLikeType(ty) ||
+         isBytesLikeType(ty);
 }
 
-unsigned mlir::sol::getStorageByteSize(Type ty) {
+bool mlir::sol::canBePacked(Type ty) { return isScalar(ty); }
+
+unsigned mlir::sol::getNumBytes(Type ty) {
   assert(canBePacked(ty) && "Only packable types have byte size");
 
   if (auto intTy = dyn_cast<IntegerType>(ty))
     // Bool occupies 1 byte in storage.
     return intTy.getWidth() == 1 ? 1 : intTy.getWidth() / 8;
 
-  if (isBytesLikeType(ty))
-    return getBytesSize(ty);
+  if (isa<ByteType>(ty))
+    return 1;
+
+  if (auto fixedBytesTy = dyn_cast<FixedBytesType>(ty))
+    return fixedBytesTy.getSize();
 
   // Enums can have at most 256 members, so always 1 byte.
   if (isa<EnumType>(ty))
@@ -442,7 +426,7 @@ static void computeStructStorageMemberOffsets(
 
   for (Type memberTy : memberTypes) {
     if (canBePacked(memberTy)) {
-      uint64_t memberByteSize = getStorageByteSize(memberTy);
+      uint64_t memberByteSize = getNumBytes(memberTy);
       if (byteOffset + memberByteSize > 32) {
         ++slotOffset;
         byteOffset = 0;

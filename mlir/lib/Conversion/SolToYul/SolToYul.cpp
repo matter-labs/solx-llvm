@@ -22,8 +22,6 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Types.h"
-#include "mlir/Interfaces/CallInterfaces.h"
-#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -351,9 +349,9 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
 
     const bool isByteToBytes1 = isa<sol::ByteType>(inpTy) &&
                                 isa<sol::FixedBytesType>(outTy) &&
-                                sol::getBytesSize(outTy) == 1;
+                                sol::getNumBytes(outTy) == 1;
     const bool isBytes1ToByte = isa<sol::FixedBytesType>(inpTy) &&
-                                sol::getBytesSize(inpTy) == 1 &&
+                                sol::getNumBytes(inpTy) == 1 &&
                                 isa<sol::ByteType>(outTy);
     if (isByteToBytes1 || isBytes1ToByte) {
       // byte <-> bytes1 is a no-op.
@@ -363,14 +361,14 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
 
     // Bytes to bytes
     if (sol::isBytesLikeType(inpTy)) {
-      unsigned inpBytesSize = sol::getBytesSize(inpTy);
+      unsigned inpBytesSize = sol::getNumBytes(inpTy);
       if (sol::isBytesLikeType(outTy)) {
         // old codegen begin
         // bytesN -> bytesM shortening is intentionally dirty for old-codegen
         // stack-slot parity. Widening must clear bytes beyond the source width.
         // (Via-IR cleans in both directions).
         Value val = adaptor.getInp();
-        if (inpBytesSize < sol::getBytesSize(outTy))
+        if (inpBytesSize < sol::getNumBytes(outTy))
           val = evmB.genCleanup(inpTy, val, loc);
         // old codegen end
 
@@ -386,7 +384,7 @@ struct BytesCastOpLowering : public OpConversionPattern<sol::BytesCastOp> {
 
     // Int to bytes
     assert(isa<IntegerType>(inpTy));
-    unsigned outBytesSize = sol::getBytesSize(outTy);
+    unsigned outBytesSize = sol::getNumBytes(outTy);
     auto shiftAmt = bExt.genI256Const(256 - (8 * outBytesSize));
     r.replaceOpWithNewOp<yul::ArithShlOp>(op, adaptor.getInp(), shiftAmt);
     return success();
@@ -1242,10 +1240,9 @@ struct EcrecoverOpLowering : public OpConversionPattern<sol::EcrecoverOp> {
     Value retSize = bExt.genI256Const(32);
     Value freePtr = evmB.genFreePtr();
     // Since the size of the encoded arguments is known in advance,
-    // we ignore the return value of genABITupleEncoding.
+    // we ignore the return value of genABIEncoding.
     Value paramsSize = bExt.genI256Const(128);
-    evmB.genABITupleEncoding(op.getOperandTypes(), adaptor.getOperands(),
-                             freePtr);
+    evmB.genABIEncoding(op.getOperandTypes(), adaptor.getOperands(), freePtr);
     evmB.genFreePtrUpd(freePtr, paramsSize);
 
     // Hashing functions store their result in scratch space (0x00–0x3f).
@@ -1755,9 +1752,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
                               .getZExtValue();
           // FIXME: Should this be done by the verifier?
           assert(constIdx < static_cast<uint64_t>(arrTy.getSize()));
-          unsigned stride = (dataLoc == sol::DataLocation::Memory)
-                                ? 32u
-                                : evm::getCallDataHeadSize(arrTy.getEltType());
+          unsigned stride = evm::getArrayEltStride(arrTy);
           addrAtIdx = r.create<yul::AddOp>(
               loc, remappedBaseAddr, bExt.genI256Const(constIdx * stride));
         }
@@ -1784,11 +1779,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
           // stored directly, reference types (arrays, structs) are stored as
           // pointers.  In calldata the stride is the ABI head size of the
           // element type.
-          unsigned strideVal =
-              (dataLoc == sol::DataLocation::Memory)
-                  ? 32u
-                  : evm::getCallDataHeadSize(arrTy.getEltType());
-          Value stride = bExt.genI256Const(strideVal);
+          Value stride = bExt.genI256Const(evm::getArrayEltStride(arrTy));
           Value scaledIdx = r.create<yul::MulOp>(loc, getCleanedIdx(), stride);
           if (arrTy.isDynSized()) {
             Value dataAddr = evmB.genDataAddrPtr(remappedBaseAddr, baseAddrTy);
@@ -2101,7 +2092,7 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         unsigned numBits;
         if (sol::isBytesLikeType(eltTy)) {
           // Bytes-like types: shr to convert from MSB-aligned to LSB-aligned.
-          numBits = sol::getBytesSize(eltTy) * 8;
+          numBits = sol::getNumBytes(eltTy) * 8;
           preparedVal = r.create<yul::ArithShrOp>(
               loc, preparedVal, bExt.genI256Const(256 - numBits));
         } else if (sol::isAddressLikeType(eltTy)) {
@@ -2197,7 +2188,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
       // Packed element types in storage require a specialized extraction loop
       // that reads multiple elements per slot. The generic element-by-element
       // loop below cannot handle packed {slot, byteOffset} addressing.
-      if (sol::canBePacked(eltTy) && sol::getStorageByteSize(eltTy) <= 16 &&
+      if (sol::canBePacked(eltTy) && sol::getNumBytes(eltTy) <= 16 &&
           srcDataLoc == sol::DataLocation::Storage) {
         evmB.genCopy(arrTy, arrTy, srcAddr, dstAddr, srcDataLoc, dstDataLoc,
                      loc);
@@ -2277,7 +2268,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
       val = r.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(64));
     else if (sol::isBytesLikeType(ty) &&
              srcDataLoc == sol::DataLocation::Storage) {
-      unsigned shift = (32 - sol::getBytesSize(ty)) * 8;
+      unsigned shift = (32 - sol::getNumBytes(ty)) * 8;
       if (shift > 0)
         val = r.create<yul::ArithShlOp>(loc, val, bExt.genI256Const(shift));
     }
@@ -2607,7 +2598,7 @@ struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
     if (op.getPacked()) {
       Value dataStart =
           r.create<yul::AddOp>(loc, freePtr, bExt.genI256Const(32));
-      Value dataEnd = evmB.genABIPackedEncoding(op.getIns().getType(),
+      Value dataEnd = evmB.genABIEncodingPacked(op.getIns().getType(),
                                                 adaptor.getIns(), dataStart);
       Value dataSize = r.create<yul::SubOp>(loc, dataEnd, dataStart);
       r.create<yul::MStoreOp>(loc, freePtr, dataSize);
@@ -2622,8 +2613,8 @@ struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
 
       Value tupleStart =
           r.create<yul::AddOp>(loc, selectorAddr, bExt.genI256Const(4));
-      Value tupleEnd = evmB.genABITupleEncoding(op.getIns().getType(),
-                                                adaptor.getIns(), tupleStart);
+      Value tupleEnd = evmB.genABIEncoding(op.getIns().getType(),
+                                           adaptor.getIns(), tupleStart);
       Value dataSize = r.create<yul::SubOp>(loc, tupleEnd, selectorAddr);
       r.create<yul::MStoreOp>(loc, freePtr, dataSize);
       Value allocationSize = r.create<yul::SubOp>(loc, tupleEnd, freePtr);
@@ -2631,8 +2622,8 @@ struct EncodeOpLowering : public OpConversionPattern<sol::EncodeOp> {
     } else {
       Value tupleStart =
           r.create<yul::AddOp>(loc, freePtr, bExt.genI256Const(32));
-      Value tupleEnd = evmB.genABITupleEncoding(op.getIns().getType(),
-                                                adaptor.getIns(), tupleStart);
+      Value tupleEnd = evmB.genABIEncoding(op.getIns().getType(),
+                                           adaptor.getIns(), tupleStart);
       Value tupleSize = r.create<yul::SubOp>(loc, tupleEnd, tupleStart);
       r.create<yul::MStoreOp>(loc, freePtr, tupleSize);
       Value allocationSize = r.create<yul::SubOp>(loc, tupleEnd, freePtr);
@@ -2733,7 +2724,7 @@ struct ExtCallOpLowering : public OpConversionPattern<sol::ExtCallOp> {
     Value tupleStart =
         r.create<yul::AddOp>(loc, selectorAddr, bExt.genI256Const(4));
     Value tupleEnd =
-        evmB.genABITupleEncoding(abiInputTys, adaptor.getIns(), tupleStart);
+        evmB.genABIEncoding(abiInputTys, adaptor.getIns(), tupleStart);
 
     // Calculate the return size statically and/or check if it's dynamic. This
     // is copied from solidity::frontend::ReturnInfo.
@@ -3050,8 +3041,8 @@ struct NewOpLowering : public OpConversionPattern<sol::NewOp> {
     r.create<yul::CodeCopyOp>(loc, bytecodeAddr, dataOffset, dataSize);
 
     Value tupleStart = r.create<yul::AddOp>(loc, bytecodeAddr, dataSize);
-    Value tupleEnd = evmB.genABITupleEncoding(
-        op.getCtorArgs().getType(), adaptor.getCtorArgs(), tupleStart);
+    Value tupleEnd = evmB.genABIEncoding(op.getCtorArgs().getType(),
+                                         adaptor.getCtorArgs(), tupleStart);
     Value allocSize = r.create<yul::SubOp>(loc, tupleEnd, bytecodeAddr);
 
     Value status;
@@ -3391,10 +3382,9 @@ struct EmitOpLowering : public OpConversionPattern<sol::EmitOp> {
       // Reference-type indexed arg: topic = keccak256(packed_encode(arg)).
       if (isa<sol::StringType, sol::ArrayType, sol::StructType>(origTy)) {
         Value scratchStart = evmB.genFreePtr();
-        Value scratchEnd =
-            evmB.genABIPackedEncoding(origTy, val, scratchStart, loc);
-        Value scratchSize =
-            r.create<yul::SubOp>(loc, scratchEnd, scratchStart);
+        Value scratchEnd = evmB.genABIEncodingPacked(
+            TypeRange{origTy}, ValueRange{val}, scratchStart, loc);
+        Value scratchSize = r.create<yul::SubOp>(loc, scratchEnd, scratchStart);
         indexedArgs.push_back(
             r.create<yul::Keccak256Op>(loc, scratchStart, scratchSize));
         continue;
@@ -3413,8 +3403,8 @@ struct EmitOpLowering : public OpConversionPattern<sol::EmitOp> {
     // Generate the tuple encoding for the non-indexed args.
     // TODO: Are we sure we need an unbounded allocation here?
     Value tupleStart = evmB.genFreePtr();
-    Value tupleEnd = evmB.genABITupleEncoding(nonIndexedArgsType,
-                                              nonIndexedArgs, tupleStart);
+    Value tupleEnd =
+        evmB.genABIEncoding(nonIndexedArgsType, nonIndexedArgs, tupleStart);
     Value tupleSize = r.create<yul::SubOp>(loc, tupleEnd, tupleStart);
 
     // Generate sol.log and replace sol.emit with it.
@@ -3813,8 +3803,8 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       auto tupleStart = evmB.genFreePtr();
       mlir::Value tupleSize;
       if (!callOp.getResultTypes().empty()) {
-        auto tupleEnd = evmB.genABITupleEncoding(
-            abiResultTys, callOp.getResults(), tupleStart);
+        auto tupleEnd =
+            evmB.genABIEncoding(abiResultTys, callOp.getResults(), tupleStart);
         tupleSize = r.create<yul::SubOp>(loc, tupleEnd, tupleStart);
       } else {
         tupleSize = bExt.genI256Const(0);
