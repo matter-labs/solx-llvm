@@ -1712,6 +1712,8 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
         uint64_t fieldIdx = constIdx.getValue().getZExtValue();
 
         ArrayRef<Type> memberTypes = structTy.getMemberTypes();
+        assert(fieldIdx < memberTypes.size() &&
+               "struct field index out of range");
         Type fieldTy = memberTypes[fieldIdx];
         auto [slotOffset, byteOffset] =
             structTy.getStorageMemberOffset(fieldIdx);
@@ -1809,18 +1811,34 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
       } else if (auto structTy = dyn_cast<sol::StructType>(baseAddrTy)) {
         auto idxConstOp = cast<yul::ConstantOp>(idx.getDefiningOp());
         uint64_t fieldIdx = idxConstOp.getValue().getZExtValue();
-        auto scaledIdx = r.create<yul::MulOp>(loc, idx, bExt.genI256Const(32));
-        res = r.create<yul::AddOp>(loc, remappedBaseAddr, scaledIdx);
+
+        // In memory every member occupies exactly 32 bytes in the head area.
+        // In calldata, members occupy their ABI head size: fixed-length arrays
+        // are inline only when their elements are statically sized, while
+        // dynamically encoded members contribute a single 32-byte offset. So
+        // we must accumulate getCallDataHeadSize() over preceding members
+        // rather than multiplying fieldIdx by 32.
+        unsigned byteOffset = 0;
+        ArrayRef<Type> memberTypes = structTy.getMemberTypes();
+        assert(fieldIdx < memberTypes.size() &&
+               "struct field index out of range");
+        if (dataLoc == sol::DataLocation::CallData) {
+          for (uint64_t i = 0; i < fieldIdx; ++i)
+            byteOffset += evm::getCallDataHeadSize(memberTypes[i]);
+        } else {
+          byteOffset = fieldIdx * 32;
+        }
+        res = r.create<yul::AddOp>(loc, remappedBaseAddr,
+                                   bExt.genI256Const(byteOffset));
 
         // For calldata structs, resolve ABI relative-offset for dynamic
         // members.
         if (dataLoc == sol::DataLocation::CallData) {
-          Type memberTy = structTy.getMemberTypes()[fieldIdx];
+          Type memberTy = memberTypes[fieldIdx];
           if (sol::hasDynamicallySizedElt(memberTy))
             res = evmB.genCalldataAccessRef(memberTy, remappedBaseAddr, res,
                                             /*isNonABI=*/true, loc);
         }
-
         // Bytes (!sol.string)
       } else if (auto strTy = dyn_cast<sol::StringType>(baseAddrTy)) {
         Value size = evmB.genDynSize(remappedBaseAddr, baseAddrTy);
