@@ -326,6 +326,12 @@ def Sol_GepOp : Sol_Op<"gep"> {
     OpBuilder<(ins "Value":$baseAddr, "Value":$idx)>
   ];
 
+  let extraClassDeclaration = [{
+    /// Returns the result type for a `sol.gep` whose base has type
+    /// `baseAddrTy` and whose pointee is `elementType`.
+    static Type getResultType(Type baseAddrTy, Type elementType);
+  }];
+
   // TODO: Verifier:
   // - Base address type is an array or a struct type.
   // - Element type should not be a pointer type.

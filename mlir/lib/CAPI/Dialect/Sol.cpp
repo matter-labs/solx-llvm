@@ -26,3 +26,12 @@ void mlirEvmLowerSetImmutables(MlirModule mod, const char **immIDs,
 void mlirEvmRemoveSetImmutables(MlirModule mod) {
   mlir::evm::removeSetImmutables(unwrap(mod));
 }
+
+MlirType mlirSolGetEltType(MlirType ty, uint64_t structFieldIdx) {
+  return wrap(mlir::sol::getEltType(unwrap(ty), structFieldIdx));
+}
+
+MlirType mlirSolGepGetResultType(MlirType baseAddrTy, MlirType elementType) {
+  return wrap(
+      mlir::sol::GepOp::getResultType(unwrap(baseAddrTy), unwrap(elementType)));
+}

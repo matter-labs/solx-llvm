@@ -27,6 +27,18 @@ MLIR_CAPI_EXPORTED void mlirEvmLowerSetImmutables(MlirModule mod,
 /// Removes all llvm.setimmutable ops.
 MLIR_CAPI_EXPORTED void mlirEvmRemoveSetImmutables(MlirModule mod);
 
+/// Returns the element type of a non-mapping reference type. For struct
+/// types, `structFieldIdx` selects the member; ignored for other types.
+MLIR_CAPI_EXPORTED MlirType mlirSolGetEltType(MlirType ty,
+                                              uint64_t structFieldIdx);
+
+/// Returns the result type of a `sol.gep` whose base has type `baseAddrTy`
+/// and whose pointee is `elementType`. The result is `!sol.ptr<elementType,
+/// L>` where `L = getDataLocation(baseAddrTy)`, except for non-pointer
+/// reference types in storage or calldata where the result is `elementType`.
+MLIR_CAPI_EXPORTED MlirType mlirSolGepGetResultType(MlirType baseAddrTy,
+                                                    MlirType elementType);
+
 #ifdef __cplusplus
 }
 #endif

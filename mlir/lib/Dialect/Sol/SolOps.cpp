@@ -278,6 +278,19 @@ void PushOp::build(OpBuilder &odsBuilder, OperationState &odsState, Value inp) {
 // GepOp
 //===----------------------------------------------------------------------===//
 
+Type GepOp::getResultType(Type baseAddrTy, Type elementType) {
+  Type resTy = sol::PointerType::get(baseAddrTy.getContext(), elementType,
+                                     sol::getDataLocation(baseAddrTy));
+
+  // Don't generate pointers to reference types in storage or calldata.
+  if (sol::isNonPtrRefType(elementType) &&
+      (sol::getDataLocation(elementType) == sol::DataLocation::Storage ||
+       sol::getDataLocation(elementType) == sol::DataLocation::CallData))
+    resTy = elementType;
+
+  return resTy;
+}
+
 void GepOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                   Value baseAddr, Value idx) {
   Type baseAddrTy = baseAddr.getType();
@@ -292,16 +305,8 @@ void GepOp::build(OpBuilder &odsBuilder, OperationState &odsState,
     eltTy = getEltType(baseAddrTy);
   }
 
-  Type resTy = sol::PointerType::get(odsBuilder.getContext(), eltTy,
-                                     getDataLocation(baseAddrTy));
-
-  // Don't generate pointers to reference types in storage or calldata.
-  if (sol::isNonPtrRefType(eltTy) &&
-      (sol::getDataLocation(eltTy) == sol::DataLocation::Storage ||
-       sol::getDataLocation(eltTy) == sol::DataLocation::CallData))
-    resTy = eltTy;
-
-  build(odsBuilder, odsState, resTy, baseAddr, idx);
+  build(odsBuilder, odsState, GepOp::getResultType(baseAddrTy, eltTy), baseAddr,
+        idx);
 }
 
 //===----------------------------------------------------------------------===//
