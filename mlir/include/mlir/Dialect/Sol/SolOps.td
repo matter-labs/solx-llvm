@@ -1081,12 +1081,14 @@ def Sol_TransferOp : Sol_Op<"transfer"> {
 def Sol_NewOp : Sol_Op<"new", [AttrSizedOperandSegments]> {
   let arguments = (ins StrAttr:$objName, UI256:$val,
                    Optional<UI256>:$salt,
-                   Variadic<AnyType>:$ctorArgs);
+                   Variadic<AnyType>:$ctorArgs,
+                   UnitAttr:$try_call);
   let results = (outs Sol_ContractType:$out);
 
   let assemblyFormat = [{
     $objName `value` `=` $val (`salt` `=` $salt^)?
-    `ctor` `(` ($ctorArgs^ `:` type($ctorArgs))? `)` attr-dict `:` qualified(type($out))
+    `ctor` `(` ($ctorArgs^ `:` type($ctorArgs))? `)` (`try` $try_call^)? attr-dict
+    `:` qualified(type($out))
   }];
 }
 

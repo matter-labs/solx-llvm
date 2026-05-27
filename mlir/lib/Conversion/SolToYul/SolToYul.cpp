@@ -3129,10 +3129,13 @@ struct NewOpLowering : public OpConversionPattern<sol::NewOp> {
       status = r.create<yul::CreateOp>(loc, adaptor.getVal(), bytecodeAddr,
                                        allocSize);
 
-    Value zero = bExt.genI256Const(0);
-    Value statusIsZero = bExt.genCmp(yul::CmpPredicate::eq, status, zero);
-    evmB.genForwardingRevert(statusIsZero);
-    r.replaceOp(op, status);
+    Value addr = status;
+    if (!op.getTryCall()) {
+      Value zero = bExt.genI256Const(0);
+      Value addrIsZero = bExt.genCmp(yul::CmpPredicate::eq, addr, zero);
+      evmB.genForwardingRevert(addrIsZero);
+    }
+    r.replaceOp(op, addr);
     return success();
   }
 };
