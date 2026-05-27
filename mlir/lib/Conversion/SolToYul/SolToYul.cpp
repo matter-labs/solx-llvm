@@ -3353,38 +3353,69 @@ struct TryOpLowering : public OpConversionPattern<sol::TryOp> {
           &switchOp.getCaseRegions()[errorCaseIdx].emplaceBlock());
       r.setInsertionPoint(r.create<sol::YieldOp>(loc));
 
-      // Genereate an if op that checks if the returndata is large enough to
-      // hold the error message.
-      auto errMsgRetCond = bExt.genCmp(yul::CmpPredicate::uge, returnDataSize,
-                                       bExt.genI256Const(0x44));
-      auto ifErrMsg = r.create<sol::IfOp>(loc, errMsgRetCond);
-
-      // Inline the error region.
-      r.inlineRegionBefore(tryOp.getErrorRegion(), ifErrMsg.getThenRegion(),
-                           ifErrMsg.getThenRegion().begin());
-      Block &thenEntry = ifErrMsg.getThenRegion().front();
-      r.setInsertionPointToStart(&thenEntry);
-      r.create<sol::StoreOp>(loc, bExt.genBool(false), runFallbackFlag);
-
-      // Generate the error message extraction code from the return data and
-      // replace the block argument with it.
-      //
-      // TODO: Is it necessary to generate all the checks in
-      // YulUtilFunctions::tryDecodeErrorMessageFunction()?
-      BlockArgument blkArg = thenEntry.getArgument(0);
-      Location loc = blkArg.getLoc();
       evm::Builder evmB(getModule(tryOp), r, loc);
+
+      // Decode the ABI-encoded Error(string) like upstream's
+      // try_decode_error_message. Three nested guards; a failed one leaves
+      // runFallbackFlag set so the fallback clause runs:
+      //
+      // - 0x44 = 4 (selector) + 0x20 (offset) + 0x20 (length)
+      // - 0x24 = 4 (selector) + 0x20 (offset)
+      // - offset is the ABI offset to the string body, read from the head.
+      // - length is the string length, read at msg.
+      // - dataEnd is one past the last byte of the returned tuple.
+      //
+      // clang-format off
+      //
+      //   if (returndatasize >= 0x44)
+      //     if (offset <= u64Max && offset + 0x24 <= returndatasize)
+      //       if (length <= u64Max && msg + 0x20 + length <= dataEnd)
+      //         run the Error clause
+      //
+      // clang-format on
+      Value sizeOk = bExt.genCmp(yul::CmpPredicate::uge, returnDataSize,
+                                 bExt.genI256Const(0x44));
+      auto ifSizeOk = r.create<sol::IfOp>(loc, sizeOk);
+      r.setInsertionPointToStart(&ifSizeOk.getThenRegion().emplaceBlock());
+      r.setInsertionPoint(r.create<sol::YieldOp>(loc));
+      Value u64Max = bExt.genI256Const(APInt::getLowBitsSet(256, 64));
       Value abiTupleSize =
           r.create<yul::SubOp>(loc, returnDataSize, bExt.genI256Const(4));
       Value abiTuple = evmB.genMemAlloc(abiTupleSize);
       r.create<yul::ReturnDataCopyOp>(loc, /*dst=*/abiTuple,
                                       /*src=*/bExt.genI256Const(4),
                                       abiTupleSize);
-      Value errMsgOffset = r.create<yul::MLoadOp>(loc, abiTuple);
-      Value errMsg = r.create<yul::AddOp>(loc, abiTuple, errMsgOffset);
+      Value offset = r.create<yul::MLoadOp>(loc, abiTuple);
+      Value offsetSmall = bExt.genCmp(yul::CmpPredicate::ule, offset, u64Max);
+      Value offsetEnd =
+          r.create<yul::AddOp>(loc, offset, bExt.genI256Const(0x24));
+      Value offsetInBounds =
+          bExt.genCmp(yul::CmpPredicate::ule, offsetEnd, returnDataSize);
+
+      Value offsetOk = r.create<yul::AndOp>(loc, offsetSmall, offsetInBounds);
+      auto ifOffsetOk = r.create<sol::IfOp>(loc, offsetOk);
+      r.setInsertionPointToStart(&ifOffsetOk.getThenRegion().emplaceBlock());
+      r.setInsertionPoint(r.create<sol::YieldOp>(loc));
+
+      Value errMsg = r.create<yul::AddOp>(loc, abiTuple, offset);
+      Value length = r.create<yul::MLoadOp>(loc, errMsg);
+      Value lengthSmall = bExt.genCmp(yul::CmpPredicate::ule, length, u64Max);
+      Value msgEnd = r.create<yul::AddOp>(
+          loc, r.create<yul::AddOp>(loc, errMsg, bExt.genI256Const(0x20)),
+          length);
+      Value dataEnd = r.create<yul::AddOp>(loc, abiTuple, abiTupleSize);
+      Value lengthInBounds =
+          bExt.genCmp(yul::CmpPredicate::ule, msgEnd, dataEnd);
+      Value lengthOk = r.create<yul::AndOp>(loc, lengthSmall, lengthInBounds);
+      auto ifLengthOk = r.create<sol::IfOp>(loc, lengthOk);
+      r.inlineRegionBefore(tryOp.getErrorRegion(), ifLengthOk.getThenRegion(),
+                           ifLengthOk.getThenRegion().begin());
+      Block &thenEntry = ifLengthOk.getThenRegion().front();
+      r.setInsertionPointToStart(&thenEntry);
+      r.create<sol::StoreOp>(loc, bExt.genBool(false), runFallbackFlag);
+      BlockArgument blkArg = thenEntry.getArgument(0);
       auto blkArgRepl = getTypeConverter()->materializeSourceConversion(
           r, loc, blkArg.getType(), errMsg);
-      // FIXME: See panic clause lowering.
       blkArg.replaceAllUsesWith(blkArgRepl);
       thenEntry.eraseArgument(0);
     }
