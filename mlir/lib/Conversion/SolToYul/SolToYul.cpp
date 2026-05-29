@@ -3978,7 +3978,8 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
                                 PatternRewriter &r) const override {
     mlir::Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    evm::Builder evmB(getModule(op), r, loc);
+    ModuleOp mod = getModule(op);
+    evm::Builder evmB(mod, r, loc);
 
     // Generate the creation and runtime ObjectOp.
     auto creationObj = r.create<yul::ObjectOp>(loc, op.getName());
@@ -4068,11 +4069,11 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
     genFreePtrInit(r, loc, reservedMemSize);
 
     if (!ctor) {
-      genCallValChk(getModule(op), r, loc);
+      genCallValChk(mod, r, loc);
     } else {
       assert(ctor.getStateMutability());
       if (*ctor.getStateMutability() != sol::StateMutability::Payable)
-        genCallValChk(getModule(op), r, loc);
+        genCallValChk(mod, r, loc);
     }
 
     // Generate the call to constructor (if required).
@@ -4154,7 +4155,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       (void)fallbackFnTy;
 
       if (fallbackFn.getStateMutability() != sol::StateMutability::Payable) {
-        genCallValChk(getModule(op), r, loc);
+        genCallValChk(mod, r, loc);
       }
       r.create<sol::CallOp>(loc, fallbackFn, /*operands=*/ValueRange{});
       r.create<yul::StopOp>(loc);
@@ -4164,25 +4165,25 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
       evmB.genRevert(loc);
     }
 
-    // Relocate global constants into their corresponding Creation/Runtime
-    // objects. StringLitOpLowering creates LLVM::GlobalOp at module scope and
-    // LLVM::AddressOfOp inside the yul::ObjectOp. Moving the global into the
-    // ObjectOp lets the EVM backend associate the CODECOPY data with the right
-    // object's data section. ObjectOpLowering (a later pass) then lifts the
-    // global back to module scope for final code generation.
-    ModuleOp runtimeMod = getModule(runtimeObj);
-    runtimeMod->walk([&runtimeMod, &r](LLVM::AddressOfOp addrOf) {
+    // StringLitOpLowering puts __data_in_code_* globals at module scope with
+    // AddressOfOps inside yul::ObjectOps. For CODECOPY to bind to the right
+    // object's data section, each global must live inside the ObjectOp that
+    // references it
+    llvm::DenseSet<LLVM::GlobalOp> toErase;
+    mod->walk([&](LLVM::AddressOfOp addrOf) {
       StringRef name = addrOf.getGlobalName();
       if (!name.starts_with("__data_in_code_"))
         return;
-
       auto obj = addrOf->getParentOfType<yul::ObjectOp>();
       assert(obj);
-      auto gOp = SymbolTable::lookupNearestSymbolFrom<LLVM::GlobalOp>(
-          runtimeMod, r.getStringAttr(name));
-      assert(gOp);
-      gOp->moveBefore(obj.getEntryBlock(), obj.getEntryBlock()->begin());
+      if (SymbolTable::lookupSymbolIn(obj, name))
+        return;
+      auto gOp = cast<LLVM::GlobalOp>(SymbolTable::lookupSymbolIn(mod, name));
+      obj.getEntryBlock()->push_front(gOp->clone());
+      toErase.insert(gOp);
     });
+    for (LLVM::GlobalOp gOp : toErase)
+      r.eraseOp(gOp);
 
     // TODO? Make sure op.getBody() is either empty or has only ops marked for
     // deletion.
