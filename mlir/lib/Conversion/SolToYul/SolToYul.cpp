@@ -4149,16 +4149,41 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
 
     // Generate fallback function.
     if (fallbackFn) {
-      FunctionType fallbackFnTy = fallbackFn.getFunctionType();
+      // Use the pre-lowering Sol signature: the live function type may already
+      // be lowered here, and we need the Sol `bytes` types below.
+      FunctionType fallbackFnTy = *fallbackFn.getOrigFnType();
+      // Solidity allows either `fallback() external [payable]` (no params, no
+      // returns) or `fallback(bytes calldata) external returns (bytes memory)`
+      // (one of each); the two always agree.
       assert(fallbackFnTy.getNumInputs() == fallbackFnTy.getNumResults() &&
-             "NYI");
-      (void)fallbackFnTy;
+             "fallback has mismatched parameter/return counts");
 
       if (fallbackFn.getStateMutability() != sol::StateMutability::Payable) {
         genCallValChk(mod, r, loc);
       }
-      r.create<sol::CallOp>(loc, fallbackFn, /*operands=*/ValueRange{});
-      r.create<yul::StopOp>(loc);
+
+      // The `bytes calldata` parameter, when present, is the full call payload:
+      // a `{offset, length}` reference of `{0, calldatasize()}`.
+      SmallVector<Value, 1> fallbackArgs;
+      if (fallbackFnTy.getNumInputs() == 1) {
+        Value callDataSz = r.create<yul::CallDataSizeOp>(loc);
+        fallbackArgs.push_back(
+            bExt.genLLVMStruct({bExt.genI256Const(0), callDataSz}, loc));
+      }
+
+      auto call = r.create<sol::CallOp>(loc, fallbackFn, fallbackArgs);
+
+      if (fallbackFnTy.getNumResults() == 1) {
+        // The returned `bytes memory` is returned verbatim (not ABI-encoded),
+        // i.e. `return(add(ret, 0x20), mload(ret))`.
+        Value ret = call.getResult(0);
+        Type retTy = fallbackFnTy.getResult(0);
+        Value dataPtr = evmB.genDataAddrPtr(ret, sol::DataLocation::Memory, loc);
+        Value len = evmB.genDynSize(ret, retTy, loc);
+        r.create<yul::ReturnOp>(loc, dataPtr, len);
+      } else {
+        r.create<yul::StopOp>(loc);
+      }
 
     } else {
       // TODO: Generate error message.
