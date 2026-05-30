@@ -1220,8 +1220,13 @@ Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
 
   // Struct type.
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
-    Value basePtr = genMemAlloc(evm::getMallocSize(ty), loc);
+    // Storage/transient struct "pointers" are i256 slot numbers, zero = slot 0.
+    if (structTy.getDataLocation() == sol::DataLocation::Storage ||
+        structTy.getDataLocation() == sol::DataLocation::Transient)
+      return bExt.genI256Const(0);
     assert(structTy.getDataLocation() == sol::DataLocation::Memory);
+
+    Value basePtr = genMemAlloc(evm::getMallocSize(ty), loc);
 
     uint64_t memOffset = 0;
     for (auto memTy : structTy.getMemberTypes()) {
