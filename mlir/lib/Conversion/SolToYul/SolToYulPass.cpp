@@ -93,6 +93,7 @@ struct ConvertSolToYulPass
         sol::DefaultFuncConstantOp,
         sol::ExtFuncConstantOp,
         sol::ExtFuncSelectorOp,
+        sol::ExtFuncAddrOp,
         sol::CastOp,
         sol::AddressCastOp,
         sol::ContractCastOp,

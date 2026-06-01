@@ -779,6 +779,13 @@ def Sol_ExtFuncSelectorOp : Sol_Op<"ext_func_selector", [Pure]> {
   let assemblyFormat = "$func attr-dict `:` qualified(type($func)) `->` type($result)";
 }
 
+def Sol_ExtFuncAddrOp : Sol_Op<"ext_func_addr", [Pure]> {
+  let summary = "Extracts the address from an external function reference";
+  let arguments = (ins Sol_ExtFuncRefType:$func);
+  let results = (outs Sol_AddressType:$result);
+  let assemblyFormat = "$func attr-dict `:` qualified(type($func)) `->` type($result)";
+}
+
 // Base class for indirect call ops (internal and external function pointers).
 class Sol_ICallOpBase<string mnemonic, dag extraArgs = (ins),
                       string extraAsmFmt = "">
