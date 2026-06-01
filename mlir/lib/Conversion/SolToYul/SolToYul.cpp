@@ -1506,18 +1506,20 @@ struct GetReturnDataOpLowering
     auto mod = getModule(op);
     evm::Builder evmB(mod, r, loc);
 
-    // Materialise the returndata as a fresh memory `bytes`, mirroring the
-    // (status, returndata) tail of the bare-call lowering: allocate a dynamic
-    // array sized to `returndatasize` and `returndatacopy` into it.
-    Value zero = bExt.genI256Const(0);
+    // Materialise the returndata (from byte offset `start`) as a fresh memory
+    // `bytes`, mirroring the (status, returndata) tail of the bare-call
+    // lowering: allocate a dynamic array sized to `returndatasize - start` and
+    // `returndatacopy` into it from `start`.
+    Value start = adaptor.getStart();
     Value retDataSize = r.create<yul::ReturnDataSizeOp>(loc);
-    Value roundedRetDataSize = bExt.genRoundUpToMultiple<32>(retDataSize);
+    Value copySize = r.create<yul::SubOp>(loc, retDataSize, start);
+    Value roundedCopySize = bExt.genRoundUpToMultiple<32>(copySize);
     Value retData =
-        evmB.genMemAllocForDynArray(retDataSize, roundedRetDataSize, loc);
+        evmB.genMemAllocForDynArray(copySize, roundedCopySize, loc);
     Value retDataStart =
         evmB.genDataAddrPtr(retData, sol::DataLocation::Memory, loc);
     r.create<yul::ReturnDataCopyOp>(loc, /*dst=*/retDataStart,
-                                    /*src=*/zero, retDataSize);
+                                    /*src=*/start, copySize);
     r.replaceOp(op, retData);
     return success();
   }

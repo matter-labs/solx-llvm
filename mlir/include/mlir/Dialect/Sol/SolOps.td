@@ -240,18 +240,21 @@ def Sol_GetCallDataOp : Sol_Op<"get_calldata"> {
 }
 
 def Sol_GetReturnDataOp : Sol_Op<"get_returndata"> {
-  let summary = "Copies the current returndata into a fresh memory `bytes`.";
+  let summary = "Copies the current returndata (from `start`) into a fresh memory `bytes`.";
   let description = [{
-    Yields the returndata of the most recent external call as a memory-located
-    `bytes` value (`returndatasize` + `returndatacopy` into a freshly allocated
-    dynamic array). Used by `try`/`catch` to materialise the revert data for the
-    catch error parameter.
+    Yields the returndata of the most recent external call, starting at byte
+    offset `$start`, as a memory-located `bytes` value (`returndatasize` -
+    `start` bytes `returndatacopy`d into a freshly allocated dynamic array).
+    `start` is `0` for the whole returndata (low-level `catch (bytes)`); typed
+    `catch Error/Panic` pass `4` to skip the error selector before ABI-decoding.
   }];
+  let arguments = (ins Sol_Int:$start);
   let results = (outs Sol_AggType:$addr);
-  let assemblyFormat = [{ attr-dict `:` type($addr) }];
+  let assemblyFormat = [{ $start attr-dict `:` type($start) `->` type($addr) }];
 
   let builders = [
-    OpBuilder<(ins), [{
+    OpBuilder<(ins "Value":$start), [{
+      $_state.addOperands(start);
       $_state.addTypes(sol::StringType::get($_builder.getContext(),
                                             sol::DataLocation::Memory));
     }]>
