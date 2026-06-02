@@ -1656,6 +1656,12 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
         cleanedIdx = evmB.genCleanup(op.getIdx().getType(), idx, loc);
       return cleanedIdx;
     };
+    auto genBoundsCheck = [&](Value cond) {
+      if (op.getNoPanicBounds())
+        evmB.genRevert(cond);
+      else
+        evmB.genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, cond);
+    };
     sol::DataLocation dataLoc = sol::getDataLocation(baseAddrTy);
     Value res;
 
@@ -1689,7 +1695,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
                            ? evmB.genDynSize(remappedBaseAddr, baseAddrTy)
                            : bExt.genI256Const(arrTy.getSize());
           auto panicCond = bExt.genCmp(yul::CmpPredicate::uge, arrayIdx, size);
-          evmB.genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, panicCond);
+          genBoundsCheck(panicCond);
         }
 
         // Base slot: keccak256(slot) for dynamic, slot for static.
@@ -1772,7 +1778,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
           // Generate `if iszero(lt(index, <arrayLen>(baseRef)))` (yul).
           auto panicCond =
               bExt.genCmp(yul::CmpPredicate::uge, getCleanedIdx(), size);
-          evmB.genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, panicCond);
+          genBoundsCheck(panicCond);
 
           //
           // Generate the address.
@@ -1844,7 +1850,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
         Value size = evmB.genDynSize(remappedBaseAddr, baseAddrTy);
         auto panicCond =
             bExt.genCmp(yul::CmpPredicate::uge, getCleanedIdx(), size);
-        evmB.genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, panicCond);
+        genBoundsCheck(panicCond);
 
         Value dataAddr = evmB.genDataAddrPtr(remappedBaseAddr, baseAddrTy);
         res = r.create<yul::AddOp>(loc, dataAddr, getCleanedIdx());

@@ -319,7 +319,8 @@ def Sol_AddrOfOp : Sol_Op<"addr_of", [Pure]> {
 }
 
 def Sol_GepOp : Sol_Op<"gep"> {
-  let arguments = (ins AnyType:$baseAddr, Sol_Int:$idx);
+  let arguments = (ins AnyType:$baseAddr, Sol_Int:$idx,
+                       UnitAttr:$no_panic_bounds);
   let results = (outs AnyTypeOf<[Sol_RefType, Sol_MappingType]>:$addr);
 
   let builders = [
@@ -339,8 +340,8 @@ def Sol_GepOp : Sol_Op<"gep"> {
   // - Struct index should be an i64.
 
   let assemblyFormat = [{
-    $baseAddr `,` $idx attr-dict `:` type($baseAddr) `,` type($idx)
-      `,` type($addr)
+    $baseAddr `,` $idx (`no_panic_bounds` $no_panic_bounds^)? attr-dict `:`
+      type($baseAddr) `,` type($idx) `,` type($addr)
   }];
 }
 

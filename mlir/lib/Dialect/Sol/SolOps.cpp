@@ -306,7 +306,7 @@ void GepOp::build(OpBuilder &odsBuilder, OperationState &odsState,
   }
 
   build(odsBuilder, odsState, GepOp::getResultType(baseAddrTy, eltTy), baseAddr,
-        idx);
+        idx, /*no_panic_bounds=*/false);
 }
 
 //===----------------------------------------------------------------------===//
