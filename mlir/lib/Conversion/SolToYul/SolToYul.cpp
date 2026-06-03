@@ -1501,6 +1501,20 @@ struct DefaultCallDataOpLowering
   }
 };
 
+struct DefaultStorageOpLowering
+    : public OpConversionPattern<sol::DefaultStorageOp> {
+  using OpConversionPattern<sol::DefaultStorageOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::DefaultStorageOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    mlir::solgen::BuilderExt bExt(r, op.getLoc());
+    // Storage and transient aggregate "pointers" are slot numbers. Slot 0 is
+    // the sentinel default (analogous to calldatasize() for calldata).
+    r.replaceOp(op, bExt.genI256Const(0));
+    return success();
+  }
+};
+
 struct PushOpLowering : public OpConversionPattern<sol::PushOp> {
   using OpConversionPattern<sol::PushOp>::OpConversionPattern;
 
@@ -4239,8 +4253,9 @@ void evm::populateCryptoPats(mlir::RewritePatternSet &pats,
 
 void evm::populateMemPats(RewritePatternSet &pats, TypeConverter &tyConv) {
   pats.add<AllocaOpLowering, MallocOpLowering, ArrayLitOpLowering,
-           GetCallDataOpLowering, DefaultCallDataOpLowering, PushOpLowering,
-           PopOpLowering, GepOpLowering, MapOpLowering, LoadOpLowering,
+           GetCallDataOpLowering, DefaultCallDataOpLowering,
+           DefaultStorageOpLowering, PushOpLowering, PopOpLowering,
+           GepOpLowering, MapOpLowering, LoadOpLowering,
            LoadImmutableMetadataConversion, StoreOpLowering,
            DataLocCastOpLowering, LengthOpLowering, SliceOpLowering,
            CopyOpLowering, PushStringOpLowering, StringLitOpLowering,

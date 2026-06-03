@@ -700,8 +700,18 @@ def Sol_DefaultCallDataOp : Sol_Op<"default_calldata", [Pure]> {
   let summary = "Default value for a calldata aggregate type";
   let results = (outs Sol_AggType:$result);
 
-  let builders = [
-    OpBuilder<(ins "::mlir::Type":$type), [{
+  let builders = [OpBuilder<(ins "::mlir::Type":$type), [{
+      $_state.addTypes(type);
+    }]>];
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Sol_DefaultStorageOp : Sol_Op<"default_storage", [Pure]> {
+  let summary = "Default value for a storage or transient aggregate type";
+  let results = (outs Sol_AggType:$result);
+
+  let builders = [OpBuilder<(ins "::mlir::Type":$type), [{
       $_state.addTypes(type);
     }]>
   ];
