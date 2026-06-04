@@ -4380,6 +4380,178 @@ void evm::populateContractPat(RewritePatternSet &pats) {
   pats.add<ContractOpLowering>(pats.getContext());
 }
 
+//===----------------------------------------------------------------------===//
+// Inline-asm wrapper + yul.* bridge / pointer-plumbing op lowerings.
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+struct InlineAsmOpLowering : public OpConversionPattern<sol::InlineAsmOp> {
+  using OpConversionPattern<sol::InlineAsmOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::InlineAsmOp op, OpAdaptor,
+                                ConversionPatternRewriter &r) const override {
+    Region &body = op.getBody();
+    Block &block = body.front();
+    // TODO: bridge ops will move out of inline_asm and become block args.
+    assert(block.getNumArguments() == 0 && "inline_asm body has block args");
+    r.inlineBlockBefore(&block, op);
+    r.eraseOp(op);
+    return success();
+  }
+};
+
+struct YulAllocaOpLowering : public OpConversionPattern<yul::AllocaOp> {
+  using OpConversionPattern<yul::AllocaOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(yul::AllocaOp op, OpAdaptor,
+                                ConversionPatternRewriter &r) const override {
+    mlir::solgen::BuilderExt bExt(r, op.getLoc());
+    auto i256Ty = IntegerType::get(r.getContext(), 256,
+                                   IntegerType::SignednessSemantics::Signless);
+    auto ptrTy = LLVM::LLVMPointerType::get(r.getContext());
+    auto alloca = r.create<LLVM::AllocaOp>(op.getLoc(), ptrTy, i256Ty,
+                                           bExt.genI256Const(1), /*align=*/32);
+    r.replaceOp(op, alloca.getRes());
+    return success();
+  }
+};
+
+struct YulLoadOpLowering : public OpConversionPattern<yul::LoadOp> {
+  using OpConversionPattern<yul::LoadOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(yul::LoadOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    auto i256Ty = IntegerType::get(r.getContext(), 256,
+                                   IntegerType::SignednessSemantics::Signless);
+    r.replaceOpWithNewOp<LLVM::LoadOp>(op, i256Ty, adaptor.getPtr(),
+                                       /*align=*/32);
+    return success();
+  }
+};
+
+struct YulStoreOpLowering : public OpConversionPattern<yul::StoreOp> {
+  using OpConversionPattern<yul::StoreOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(yul::StoreOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    r.replaceOpWithNewOp<LLVM::StoreOp>(op, adaptor.getVal(), adaptor.getPtr(),
+                                        /*align=*/32);
+    return success();
+  }
+};
+
+// sol.yul_ptr_cast / sol.yul_storage_slot
+template <typename OpT>
+struct IdentityCastLowering : public OpConversionPattern<OpT> {
+  using OpConversionPattern<OpT>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(OpT op, typename OpT::Adaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    r.replaceOp(op, adaptor.getSrc());
+    return success();
+  }
+};
+
+// Generates gep to a struct field through an opaque !llvm.ptr operand.
+static Value genStructFieldGep(ConversionPatternRewriter &r, Location loc,
+                               Value structPtr, LLVM::LLVMStructType structTy,
+                               int field) {
+  auto ptrTy = LLVM::LLVMPointerType::get(r.getContext());
+  return r.create<LLVM::GEPOp>(
+      loc, ptrTy, structTy, structPtr,
+      ArrayRef<LLVM::GEPArg>{LLVM::GEPArg(0), LLVM::GEPArg(field)});
+}
+
+// sol.yul_calldata_offset / sol.yul_calldata_length
+template <typename OpT, int Field>
+struct CallDataMemberLowering : public OpConversionPattern<OpT> {
+  using OpConversionPattern<OpT>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(OpT op, typename OpT::Adaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    auto i256Ty = IntegerType::get(r.getContext(), 256,
+                                   IntegerType::SignednessSemantics::Signless);
+    auto structTy =
+        LLVM::LLVMStructType::getLiteral(r.getContext(), {i256Ty, i256Ty});
+    Value gep =
+        genStructFieldGep(r, op.getLoc(), adaptor.getSrc(), structTy, Field);
+    r.replaceOp(op, gep);
+    return success();
+  }
+};
+
+// sol.yul_selector / sol.yul_address_of
+template <typename OpT, int Field>
+struct ExtFuncMemberLowering : public OpConversionPattern<OpT> {
+  using OpConversionPattern<OpT>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(OpT op, typename OpT::Adaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    auto i256Ty = IntegerType::get(r.getContext(), 256,
+                                   IntegerType::SignednessSemantics::Signless);
+    auto structTy =
+        LLVM::LLVMStructType::getLiteral(r.getContext(), {i256Ty, i256Ty});
+    Value gep =
+        genStructFieldGep(r, op.getLoc(), adaptor.getSrc(), structTy, Field);
+    r.replaceOp(op, gep);
+    return success();
+  }
+};
+
+// sol.yul_storage_offset: local storage ref `.offset` is always 0 for ref-type
+// pointees (the only kind of local storage ref Solidity admits).
+struct StorageOffsetOpLowering
+    : public OpConversionPattern<sol::YulStorageOffsetOp> {
+  using OpConversionPattern<sol::YulStorageOffsetOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::YulStorageOffsetOp op, OpAdaptor,
+                                ConversionPatternRewriter &r) const override {
+    mlir::solgen::BuilderExt bExt(r, op.getLoc());
+    r.replaceOp(op, bExt.genI256Const(0));
+    return success();
+  }
+};
+
+// sol.yul_state_var_slot / sol.yul_state_var_offset
+template <typename OpT, bool IsOffset>
+struct StateVarFieldLowering : public OpConversionPattern<OpT> {
+  using OpConversionPattern<OpT>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(OpT op, typename OpT::Adaptor,
+                                ConversionPatternRewriter &r) const override {
+    auto contract = op->template getParentOfType<sol::ContractOp>();
+    assert(contract);
+
+    auto sym = contract.template lookupSymbol<sol::StateVarOp>(
+        op.getSymAttr().getValue());
+    assert(sym);
+
+    mlir::solgen::BuilderExt bExt(r, op.getLoc());
+    APInt value = IsOffset ? APInt(/*numBits=*/256, sym.getByteOffset())
+                           : sym.getSlot().zextOrTrunc(256);
+    r.replaceOp(op, bExt.genI256Const(value));
+    return success();
+  }
+};
+
+} // namespace
+
+void evm::populateInlineAsmPats(RewritePatternSet &pats,
+                                TypeConverter &tyConv) {
+  pats.add<InlineAsmOpLowering, YulAllocaOpLowering, YulLoadOpLowering,
+           YulStoreOpLowering, IdentityCastLowering<sol::YulPtrCastOp>,
+           IdentityCastLowering<sol::YulStorageSlotOp>,
+           CallDataMemberLowering<sol::YulCallDataOffsetOp, 0>,
+           CallDataMemberLowering<sol::YulCallDataLengthOp, 1>,
+           ExtFuncMemberLowering<sol::YulFuncAddrOp, 0>,
+           ExtFuncMemberLowering<sol::YulSelectorOp, 1>,
+           StorageOffsetOpLowering,
+           StateVarFieldLowering<sol::YulStateVarSlotOp, /*IsOffset=*/false>,
+           StateVarFieldLowering<sol::YulStateVarOffsetOp, /*IsOffset=*/true>>(
+      tyConv, pats.getContext());
+}
+
 void evm::populateStage1Pats(RewritePatternSet &pats, TypeConverter &tyConv) {
   populateArithPats(pats, tyConv);
   populateCheckedArithPats(pats, tyConv);
@@ -4391,6 +4563,7 @@ void evm::populateStage1Pats(RewritePatternSet &pats, TypeConverter &tyConv) {
   populateEmitPat(pats, tyConv);
   populateRequirePat(pats);
   populateControlFlowPats(pats, tyConv);
+  populateInlineAsmPats(pats, tyConv);
 }
 
 void evm::populateStage2Pats(RewritePatternSet &pats, TypeConverter &tyConv) {

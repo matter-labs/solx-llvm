@@ -12,9 +12,15 @@
 
 #include "mlir/Dialect/Yul/Yul.h"
 
+#include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
+
 #include "mlir/Dialect/Yul/YulInterfaces.cpp.inc"
 #include "mlir/Dialect/Yul/YulOpsDialect.cpp.inc"
 #include "mlir/Dialect/Yul/YulOpsEnums.cpp.inc"
+
+#define GET_TYPEDEF_CLASSES
+#include "mlir/Dialect/Yul/YulOpsTypes.cpp.inc"
 
 using namespace mlir;
 using namespace mlir::yul;
@@ -23,6 +29,10 @@ void YulDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "mlir/Dialect/Yul/YulOps.cpp.inc"
+      >();
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "mlir/Dialect/Yul/YulOpsTypes.cpp.inc"
       >();
 }
 

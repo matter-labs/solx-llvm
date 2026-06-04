@@ -77,6 +77,9 @@ void populateLateSolToYulPats(RewritePatternSet &pats, TypeConverter &tyConv);
 /// Adds the conversion pattern of sol.contract.
 void populateContractPat(RewritePatternSet &pats);
 
+/// Adds patterns for sol.inline_asm and related ops.
+void populateInlineAsmPats(RewritePatternSet &pats, TypeConverter &tyConv);
+
 void populateStage1Pats(RewritePatternSet &pats, TypeConverter &tyConv);
 
 void populateStage2Pats(RewritePatternSet &pats, TypeConverter &tyConv);

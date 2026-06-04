@@ -22,6 +22,7 @@ def Yul_Dialect : Dialect {
   let name = "yul";
   let cppNamespace = "::mlir::yul";
   let hasConstantMaterializer = 1;
+  let useDefaultTypePrinterParser = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -33,6 +34,11 @@ def I256 : I<256>;
 def I256OrI256LLVMStruct : Type<
   CPred<"::mlir::yul::isI256OrI256LLVMStruct($_self)">,
   "i256 or LLVM struct type containing only i256 elements">;
+
+def Yul_PtrType : TypeDef<Yul_Dialect, "Ptr"> {
+  let mnemonic = "ptr";
+  let summary = "A stack pointer to i256";
+}
 
 //===----------------------------------------------------------------------===//
 // Attributes

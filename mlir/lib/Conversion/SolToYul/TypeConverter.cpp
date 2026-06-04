@@ -14,6 +14,7 @@
 #include "mlir/Conversion/SolToYul/SolToYul.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Sol/Sol.h"
+#include "mlir/Dialect/Yul/Yul.h"
 
 using namespace mlir;
 
@@ -198,6 +199,11 @@ evm::SolTypeConverter::SolTypeConverter() {
     }
 
     llvm_unreachable("Unimplemented type conversion");
+  });
+
+  // Yul pointer type
+  addConversion([](yul::PtrType ty) -> Type {
+    return LLVM::LLVMPointerType::get(ty.getContext());
   });
 
   addSourceMaterialization(

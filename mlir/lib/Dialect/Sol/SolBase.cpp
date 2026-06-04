@@ -163,6 +163,37 @@ bool mlir::sol::isNonPtrRefType(Type ty) {
   return !isScalar(ty) && !isa<PointerType>(ty);
 }
 
+static Type getStackPointee(Type type) {
+  auto ptr = dyn_cast<sol::PointerType>(type);
+  if (!ptr || ptr.getDataLocation() != sol::DataLocation::Stack)
+    return {};
+  return ptr.getPointeeType();
+}
+
+bool mlir::sol::isStackPtr(Type type) { return !!getStackPointee(type); }
+
+bool mlir::sol::isStackPtrToStorageRef(Type type) {
+  Type pointee = getStackPointee(type);
+  if (!pointee)
+    return false;
+  if (!isNonPtrRefType(pointee))
+    return false;
+  auto loc = getDataLocation(pointee);
+  return loc == DataLocation::Storage || loc == DataLocation::Transient;
+}
+
+bool mlir::sol::isStackPtrToDynCallData(Type type) {
+  Type pointee = getStackPointee(type);
+  if (!pointee)
+    return false;
+  return getDataLocation(pointee) == DataLocation::CallData &&
+         isDynamicallySized(pointee);
+}
+
+bool mlir::sol::isStackPtrToExtFuncRef(Type type) {
+  return isa_and_nonnull<ExtFuncRefType>(getStackPointee(type));
+}
+
 bool mlir::sol::isLeftAligned(Type ty) {
   assert(isScalar(ty) && "Alignment only defined for scalar types");
   // FixedBytesN / `byte` and ExtFuncRef occupy the high bytes of the

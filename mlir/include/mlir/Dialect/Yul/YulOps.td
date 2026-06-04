@@ -822,4 +822,23 @@ def Yul_LinkerSymbolOp : Yul_Op<"linkersymbol"> {
   let assemblyFormat = "$name attr-dict";
 }
 
+def Yul_AllocaOp : Yul_Op<"alloca"> {
+  let summary = "Yul-local i256 allocation";
+  let results = (outs Yul_PtrType:$out);
+  let assemblyFormat = "attr-dict `:` type($out)";
+}
+
+def Yul_LoadOp : Yul_Op<"load"> {
+  let summary = "Load i256 from a yul pointer";
+  let arguments = (ins Yul_PtrType:$ptr);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$ptr attr-dict `:` type($ptr) `->` type($out)";
+}
+
+def Yul_StoreOp : Yul_Op<"store"> {
+  let summary = "Store i256 through a yul pointer";
+  let arguments = (ins I256:$val, Yul_PtrType:$ptr);
+  let assemblyFormat = "$val `,` $ptr attr-dict `:` type($val) `,` type($ptr)";
+}
+
 #endif // MLIR_DIALECT_YUL_YULOPS_TD

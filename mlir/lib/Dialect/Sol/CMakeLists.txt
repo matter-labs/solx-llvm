@@ -8,8 +8,13 @@ add_mlir_dialect_library(MLIRSolDialect
   DEPENDS
   MLIRSolOpsIncGen
   MLIRSolExtraIncGen
+  MLIRYulOpsIncGen
+  MLIRYulExtraIncGen
+  MLIRYulInterfacesIncGen
 
   LINK_LIBS PUBLIC
+  # Bridge ops (sol.ptr_cast, sol.selector, ...) produce !yul.ptr.
+  MLIRYulDialect
   )
 
 add_subdirectory(Transforms)

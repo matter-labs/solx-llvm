@@ -1267,4 +1267,78 @@ def Sol_ConcatOp : Sol_Op<"concat"> {
   let assemblyFormat = "($args^ `:` type($args))? attr-dict `->` type($result)";
 }
 
+def Sol_InlineAsmOp : Sol_Op<"inline_asm", [NoTerminator]> {
+  let summary = "Region wrapping an inline-assembly body";
+  let arguments = (ins OptionalAttr<UnitAttr>:$memory_safe);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "attr-dict-with-keyword $body";
+}
+
+//===----------------------------------------------------------------------===//
+// Inline-asm bridge ops (Sol -> Yul boundary)
+//===----------------------------------------------------------------------===//
+
+def Sol_YulPtrCastOp : Sol_Op<"yul_ptr_cast", [Pure]> {
+  let summary = "Reinterpret a sol.ptr<*, Stack> as a yul.ptr";
+  let arguments = (ins Sol_AnyStackPtr:$src);
+  let results = (outs Sol_YulPtr:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($out)";
+}
+
+def Sol_YulStorageSlotOp : Sol_Op<"yul_storage_slot", [Pure]> {
+  let summary = "yul.ptr to the slot field of a local storage ref alloca";
+  let arguments = (ins Sol_StorageRefStackPtr:$src);
+  let results = (outs Sol_YulPtr:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($out)";
+}
+
+def Sol_YulCallDataOffsetOp : Sol_Op<"yul_calldata_offset", [Pure]> {
+  let summary = "yul.ptr to the offset field of a calldata dynamic ref alloca";
+  let arguments = (ins Sol_DynCallDataStackPtr:$src);
+  let results = (outs Sol_YulPtr:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($out)";
+}
+
+def Sol_YulCallDataLengthOp : Sol_Op<"yul_calldata_length", [Pure]> {
+  let summary = "yul.ptr to the length field of a calldata dynamic ref alloca";
+  let arguments = (ins Sol_DynCallDataStackPtr:$src);
+  let results = (outs Sol_YulPtr:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($out)";
+}
+
+def Sol_YulSelectorOp : Sol_Op<"yul_selector", [Pure]> {
+  let summary = "yul.ptr to the selector field of an ext_func_ref alloca";
+  let arguments = (ins Sol_ExtFuncRefStackPtr:$src);
+  let results = (outs Sol_YulPtr:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($out)";
+}
+
+def Sol_YulFuncAddrOp : Sol_Op<"yul_address_of", [Pure]> {
+  let summary = "yul.ptr to the address field of an ext_func_ref alloca";
+  let arguments = (ins Sol_ExtFuncRefStackPtr:$src);
+  let results = (outs Sol_YulPtr:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($out)";
+}
+
+def Sol_YulStorageOffsetOp : Sol_Op<"yul_storage_offset", [Pure]> {
+  let summary = "Read `.offset` of a local storage ref (always 0 for ref types)";
+  let arguments = (ins Sol_StorageRefStackPtr:$src);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$src attr-dict `:` type($src)";
+}
+
+def Sol_YulStateVarSlotOp : Sol_Op<"yul_state_var_slot", [Pure]> {
+  let summary = "Compile-time `.slot` of a state variable";
+  let arguments = (ins FlatSymbolRefAttr:$sym);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$sym attr-dict";
+}
+
+def Sol_YulStateVarOffsetOp : Sol_Op<"yul_state_var_offset", [Pure]> {
+  let summary = "Compile-time `.offset` of a state variable";
+  let arguments = (ins FlatSymbolRefAttr:$sym);
+  let results = (outs I256:$out);
+  let assemblyFormat = "$sym attr-dict";
+}
+
 #endif // MLIR_DIALECT_SOL_SOLOPS_TD

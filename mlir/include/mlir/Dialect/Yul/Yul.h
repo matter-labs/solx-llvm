@@ -35,6 +35,9 @@ bool isI256OrI256LLVMStruct(Type type);
 #include "mlir/Dialect/Yul/YulOpsDialect.h.inc"
 #include "mlir/Dialect/Yul/YulOpsEnums.h.inc"
 
+#define GET_TYPEDEF_CLASSES
+#include "mlir/Dialect/Yul/YulOpsTypes.h.inc"
+
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Yul/YulOps.h.inc"
 
