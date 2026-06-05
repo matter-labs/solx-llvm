@@ -143,27 +143,27 @@ def Sol_ModOp : Sol_UncheckedIntArithOp<"mod"> {
 def Sol_ExpOp : Sol_IntExpOp<"exp", [Pure]> {
   // TODO: folder, canonicalizer
 }
-def Sol_ShlOp : Sol_UncheckedIntArithOp<"shl"> {
+def Sol_ShlOp : Sol_BitwiseShiftOp<"shl"> {
   // TODO: folder, canonicalizer
 }
-def Sol_ShrOp : Sol_UncheckedIntArithOp<"shr"> {
+def Sol_ShrOp : Sol_BitwiseShiftOp<"shr"> {
   // TODO: folder, canonicalizer
 }
-def Sol_AndOp : Sol_UncheckedIntArithOp<"and", [Commutative]> {
+def Sol_AndOp : Sol_BitwiseBinOp<"and", [Commutative]> {
   // TODO: folder, canonicalizer
 }
-def Sol_OrOp : Sol_UncheckedIntArithOp<"or", [Commutative]> {
+def Sol_OrOp : Sol_BitwiseBinOp<"or", [Commutative]> {
   // TODO: folder, canonicalizer
 }
-def Sol_XorOp : Sol_UncheckedIntArithOp<"xor", [Commutative]> {
+def Sol_XorOp : Sol_BitwiseBinOp<"xor", [Commutative]> {
   // TODO: folder, canonicalizer
 }
 
 def Sol_NotOp : Sol_Op<"not", [Pure, SameOperandsAndResultType]> {
   let summary = "Represents Solidity bitwise not";
 
-  let arguments = (ins Sol_Int:$value);
-  let results = (outs Sol_Int:$result);
+  let arguments = (ins Sol_BitwiseTy:$value);
+  let results = (outs Sol_BitwiseTy:$result);
 
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }

@@ -75,6 +75,12 @@ def Sol_FixedBytesType : Sol_Type<"FixedBytes", "fixedbytes"> {
 
 def Sol_ByteType : Sol_Type<"Byte", "byte">;
 
+// Extends Sol_Int with Solidity's fixed-bytes types (bytes1 .. bytes32 and the
+// legacy `byte` alias). Used as the operand/result type constraint for bitwise
+// ops (and, or, xor, not, shl, shr) that must work on both integer and bytesN
+// values without converting to an intermediate integer form.
+def Sol_BitwiseTy : AnyTypeOf<[Sol_Int, Sol_FixedBytesType, Sol_ByteType]>;
+
 def Sol_DataLocation : I32Enum<"DataLocation",
                                "Data-location in reference-types",
                                [I32EnumCase<"Storage", 0>,
@@ -270,6 +276,26 @@ class Sol_IntArithOp<string mnemonic, list<Trait> traits = []> :
 
 class Sol_UncheckedIntArithOp<string mnemonic, list<Trait> traits = []> :
     Sol_IntArithOp<mnemonic, traits # [Pure]>;
+
+// Base for bitwise binary ops (and, or, xor) that accept both integer and
+// bytesN operands. All three types (lhs, rhs, result) must be the same.
+class Sol_BitwiseBinOp<string mnemonic, list<Trait> traits = []> :
+    Sol_Op<mnemonic, traits#[Pure, SameOperandsAndResultType]> {
+  let arguments = (ins Sol_BitwiseTy:$lhs, Sol_BitwiseTy:$rhs);
+  let results = (outs Sol_BitwiseTy:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
+}
+
+// Base for shift ops (shl, shr) that accept bytesN as value (lhs) while the
+// shift amount (rhs) remains an integer. lhs and result share the same type.
+// Rhs is an independent integer type (typically the mobile type of the shift
+// expression).
+class Sol_BitwiseShiftOp<string mnemonic, list<Trait> traits = []> :
+    Sol_Op<mnemonic, traits#[Pure, AllTypesMatch<["lhs", "result"]>]> {
+  let arguments = (ins Sol_BitwiseTy:$lhs, Sol_Int:$rhs);
+  let results = (outs Sol_BitwiseTy:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs)";
+}
 
 class Sol_IntExpOp<string mnemonic, list<Trait> traits = []> :
     Sol_Op<mnemonic, traits # [AllTypesMatch<["lhs", "result"]>]> {

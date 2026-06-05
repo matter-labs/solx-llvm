@@ -915,11 +915,12 @@ struct ShrOpLowering
 
   LogicalResult rewriteCleaned(sol::ShrOp op, ConversionPatternRewriter &r,
                                Value val, Value shift) const {
-    auto ty = cast<IntegerType>(op.getType());
-    if (ty.isSigned())
-      r.replaceOpWithNewOp<yul::SarOp>(op, shift, val);
-    else
-      r.replaceOpWithNewOp<yul::ShrOp>(op, shift, val);
+    if (auto ty = dyn_cast<IntegerType>(op.getType()))
+      if (ty.isSigned()) {
+        r.replaceOpWithNewOp<yul::SarOp>(op, shift, val);
+        return success();
+      }
+    r.replaceOpWithNewOp<yul::ShrOp>(op, shift, val);
     return success();
   }
 };
