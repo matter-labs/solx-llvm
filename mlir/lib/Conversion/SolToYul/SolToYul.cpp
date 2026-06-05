@@ -1792,7 +1792,7 @@ struct GepOpLowering : public OpConversionPattern<sol::GepOp> {
                               .getValue()
                               .getZExtValue();
           // FIXME: Should this be done by the verifier?
-          assert(constIdx < static_cast<uint64_t>(arrTy.getSize()));
+          assert(llvm::APInt(256, constIdx).ult(arrTy.getSize()));
           unsigned stride = evm::getArrayEltStride(arrTy);
           addrAtIdx = r.create<yul::AddOp>(
               loc, remappedBaseAddr, bExt.genI256Const(constIdx * stride));
@@ -2230,7 +2230,7 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
         srcDataAddr = evmB.genDataAddrPtr(srcAddr, srcDataLoc);
       } else {
         size = bExt.genI256Const(arrTy.getSize());
-        dstAddr = evmB.genMemAlloc(arrTy.getSize() * 32);
+        dstAddr = evmB.genMemAlloc(arrTy.getSize().getZExtValue() * 32);
         dstDataAddr = dstAddr;
         srcDataAddr = srcAddr;
       }

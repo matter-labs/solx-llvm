@@ -56,7 +56,8 @@ unsigned getCalldataEncodedTailSize(Type ty) {
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
     if (arrTy.isDynSized())
       return 32;
-    return arrTy.getSize() * evm::getCallDataHeadSize(arrTy.getEltType());
+    return arrTy.getSize().getZExtValue() *
+           evm::getCallDataHeadSize(arrTy.getEltType());
   }
   if (auto structTy = dyn_cast<sol::StructType>(ty))
     return getStructCalldataEncodedTailSize(structTy);
@@ -780,7 +781,7 @@ struct ABIDecodeGuards {
   void requireFixedArraySpan(Value baseAddr, sol::ArrayType arrTy) {
     Value endAddr = b.create<yul::AddOp>(
         loc, baseAddr,
-        bExt.genI256Const(arrTy.getSize() *
+        bExt.genI256Const(arrTy.getSize().getZExtValue() *
                           evm::getCallDataHeadSize(arrTy.getEltType())));
     requireEndInBounds(endAddr, kInvalidArrayStride);
   }
@@ -821,7 +822,8 @@ unsigned evm::getCallDataHeadSize(Type ty) {
     return 32;
 
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty))
-    return arrTy.getSize() * getCallDataHeadSize(arrTy.getEltType());
+    return arrTy.getSize().getZExtValue() *
+           getCallDataHeadSize(arrTy.getEltType());
 
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
     unsigned size = 0;
@@ -853,7 +855,7 @@ int64_t evm::getMallocSize(Type ty) {
   // Array type.
   if (auto arrayTy = dyn_cast<sol::ArrayType>(ty)) {
     assert(!arrayTy.isDynSized());
-    return arrayTy.getSize() * 32;
+    return static_cast<int64_t>(arrayTy.getSize().getZExtValue()) * 32;
   }
   // Struct type.
   if (auto structTy = dyn_cast<sol::StructType>(ty)) {
@@ -1962,7 +1964,7 @@ void evm::Builder::genClearStorageValue(Type ty, Value slot, Location loc) {
       // Fixed-size array with complex element type (dyn array, string,
       // struct): iterate each element and recurse.
       Type eltTy = arrTy.getEltType();
-      unsigned size = arrTy.getSize();
+      unsigned size = arrTy.getSize().getZExtValue();
       unsigned slotsPerElt = sol::getStorageSlotCount(eltTy);
       for (unsigned i = 0; i < size; ++i) {
         Value eltSlot =
@@ -2140,8 +2142,8 @@ void evm::Builder::genResizeDynStorageArray(Value arraySlot, Value newLen,
   genStore(newLen, arraySlot, sol::DataLocation::Storage, loc);
 
   // Zero out storage slots that fall outside the new range.
-  auto dynArrTy = sol::ArrayType::get(b.getContext(), /*size=*/-1, eltTy,
-                                      sol::DataLocation::Storage);
+  auto dynArrTy = sol::ArrayType::get(b.getContext(), /*size=*/std::nullopt,
+                                      eltTy, sol::DataLocation::Storage);
   genClearStorageArrayTail(arraySlot, dynArrTy, newLen, oldLen,
                            /*isDecrement=*/false, loc);
 }
@@ -2572,7 +2574,7 @@ void evm::Builder::genCopy(Type srcTy, Type dstTy, Value srcAddr, Value dstAddr,
       length = bExt.genI256Const(srcArrTy.getSize());
       dstDataAddr = dstAddr;
       srcDataAddr = srcAddr;
-      if (dstIsStorage && srcArrTy.getSize() < dstArrTy.getSize()) {
+      if (dstIsStorage && srcArrTy.getSize().ult(dstArrTy.getSize())) {
         genClearStorageArrayTail(dstAddr, dstArrTy,
                                  bExt.genI256Const(srcArrTy.getSize()),
                                  bExt.genI256Const(dstArrTy.getSize()),
@@ -3341,7 +3343,8 @@ Value evm::Builder::genABITupleDecoding(Type ty, Value addr, bool fromMem,
       dstAddr = b.create<yul::AddOp>(loc, dstAddr, thirtyTwo);
       size = i256Size;
     } else {
-      dstAddr = genMemAlloc(bExt.genI256Const(arrTy.getSize() * 32), loc);
+      dstAddr = genMemAlloc(
+          bExt.genI256Const(arrTy.getSize().getZExtValue() * 32), loc);
       ret = dstAddr;
       srcAddr = addr;
       size = bExt.genI256Const(arrTy.getSize());

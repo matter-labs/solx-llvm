@@ -90,7 +90,7 @@ evm::SolTypeConverter::SolTypeConverter() {
     switch (ty.getDataLocation()) {
     case sol::DataLocation::Stack: {
       Type eltTy = convertType(ty.getEltType());
-      return LLVM::LLVMArrayType::get(eltTy, ty.getSize());
+      return LLVM::LLVMArrayType::get(eltTy, ty.getSize().getZExtValue());
     }
 
     // Map to fat pointer {addr, size}.

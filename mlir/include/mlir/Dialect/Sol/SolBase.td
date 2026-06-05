@@ -98,15 +98,36 @@ def Sol_StringType : Sol_Type<"String", "string"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+// Optional APInt parameter whose comparator explicitly checks bit-widths before
+// calling APInt::operator==. The default std::optional<APInt> comparator would
+// delegate to APInt::operator==, which asserts equal widths.
+def Sol_OptAPIntParam
+    : AttrOrTypeParameter<"::std::optional<::llvm::APInt>", ""> {
+  let comparator = [{
+    (!$_lhs.has_value() && !$_rhs.has_value()) ||
+    ($_lhs.has_value() && $_rhs.has_value() &&
+     $_lhs->getBitWidth() == $_rhs->getBitWidth() &&
+     *$_lhs == *$_rhs)
+  }];
+}
+
 def Sol_ArrayType : Sol_Type<"Array", "array"> {
-  let parameters = (ins "int64_t":$size, "Type":$eltType,
+  let parameters = (ins Sol_OptAPIntParam:$sizeOpt, "Type":$eltType,
                     Sol_DataLocation:$dataLocation);
 
   let extraClassDeclaration = [{
-    /// Returns true if the size is dynamic.
-    bool isDynSized() { return getSize() == -1; }
+    /// Returns true if the size is dynamic (nullopt = dynamic array).
+    bool isDynSized() const { return !getSizeOpt().has_value(); }
+
+    /// Returns the static size as a 256-bit APInt.
+    /// Must only be called on statically-sized arrays (check isDynSized() first).
+    ::llvm::APInt getSize() const {
+      assert(!isDynSized() && "dynamic arrays have no static size");
+      return *getSizeOpt();
+    }
   }];
 
+  let genVerifyDecl = 1;
   let hasCustomAssemblyFormat = 1;
 }
 
