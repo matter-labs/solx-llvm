@@ -68,12 +68,14 @@ OpFoldResult ConstantOp::fold(FoldAdaptor adaptor) { return getValue(); }
 //===----------------------------------------------------------------------===//
 
 OpFoldResult CastOp::fold(FoldAdaptor adaptor) {
-  auto intTy = cast<IntegerType>(getType());
+  auto srcIntTy = cast<IntegerType>(getInp().getType());
+  auto dstIntTy = cast<IntegerType>(getType());
   return constFoldCastOp<IntegerAttr, IntegerAttr>(
       adaptor.getOperands(), getType(),
-      [&](const APInt &val, bool &castStatus) {
-        return intTy.isSigned() ? val.sext(intTy.getWidth())
-                                : val.zext(intTy.getWidth());
+      [&](const APInt &val, bool &castStatus) -> APInt {
+        unsigned dstWidth = dstIntTy.getWidth();
+        return srcIntTy.isSigned() ? val.sextOrTrunc(dstWidth)
+                                   : val.zextOrTrunc(dstWidth);
       });
 }
 
