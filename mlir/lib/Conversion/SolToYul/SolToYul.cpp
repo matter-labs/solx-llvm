@@ -174,16 +174,16 @@ struct ExtFuncConstantOpLowering
                                 ConversionPatternRewriter &r) const override {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
-    // Combine addr + selector into MSB-aligned i256:
-    // ((addr << 32) | selector) << 64
-    Value addr = adaptor.getAddr();
-    Value addrShifted =
-        r.create<yul::ArithShlOp>(loc, addr, bExt.genI256Const(32));
+    auto i256Ty = r.getIntegerType(256);
+    auto structTy =
+        LLVM::LLVMStructType::getLiteral(r.getContext(), {i256Ty, i256Ty});
+    Value undef = r.create<LLVM::UndefOp>(loc, structTy);
     Value selector = bExt.genI256Const(op.getSelector());
-    Value combined = r.create<yul::OrOp>(loc, addrShifted, selector);
-    Value result =
-        r.create<yul::ArithShlOp>(loc, combined, bExt.genI256Const(64));
-    r.replaceOp(op, result);
+    Value withAddr = r.create<LLVM::InsertValueOp>(
+        loc, undef, adaptor.getAddr(), r.getDenseI64ArrayAttr({0}));
+    Value full = r.create<LLVM::InsertValueOp>(loc, withAddr, selector,
+                                               r.getDenseI64ArrayAttr({1}));
+    r.replaceOp(op, full);
     return success();
   }
 };
@@ -193,15 +193,9 @@ struct ExtFuncAddrOpLowering : public OpConversionPattern<sol::ExtFuncAddrOp> {
 
   LogicalResult matchAndRewrite(sol::ExtFuncAddrOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &r) const override {
-    Location loc = op.getLoc();
-    mlir::solgen::BuilderExt bExt(r, loc);
-
-    // ExtFuncRef is packed as:
-    //   | addr (160) | selector (32) | zeros (64) |
-    // The address occupies bits [255:96]; shift right by 96 to right-align it
-    // into a clean 160-bit address (high bits zero-filled).
-    r.replaceOpWithNewOp<yul::ArithShrOp>(op, adaptor.getFunc(),
-                                          bExt.genI256Const(96));
+    auto i256Ty = r.getIntegerType(256);
+    r.replaceOpWithNewOp<LLVM::ExtractValueOp>(op, i256Ty, adaptor.getFunc(),
+                                               r.getDenseI64ArrayAttr({0}));
     return success();
   }
 };
@@ -215,12 +209,12 @@ struct ExtFuncSelectorOpLowering
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
 
-    // ExtFuncRef is packed as:
-    //   | addr (160) | selector (32) | zeros (64) |
-    // and bytes4 is represented as the selector in the top 32 bits.
-    // Shift left to move the selector into the MSB-aligned bytes4 position.
-    r.replaceOpWithNewOp<yul::ArithShlOp>(op, adaptor.getFunc(),
-                                          bExt.genI256Const(160));
+    // Result is bytes4, which is represented as MSB-aligned in i256 (bits
+    // [255:224] = selector)
+    auto i256Ty = r.getIntegerType(256);
+    Value sel = r.create<LLVM::ExtractValueOp>(loc, i256Ty, adaptor.getFunc(),
+                                               r.getDenseI64ArrayAttr({1}));
+    r.replaceOpWithNewOp<yul::ArithShlOp>(op, sel, bExt.genI256Const(224));
     return success();
   }
 };
@@ -1341,6 +1335,28 @@ struct CmpOpLowering
 
     yul::CmpPredicate signlessPred =
         getSignlessPred(op.getPredicate(), isSigned);
+    if (isa<sol::ExtFuncRefType>(op.getLhs().getType())) {
+      assert((signlessPred == yul::CmpPredicate::eq ||
+              signlessPred == yul::CmpPredicate::ne) &&
+             "Illegal compare mode");
+      auto i256Ty = r.getIntegerType(256);
+      Value lhsAddr = r.create<LLVM::ExtractValueOp>(
+          loc, i256Ty, lhs, r.getDenseI64ArrayAttr({0}));
+      Value lhsSel = r.create<LLVM::ExtractValueOp>(
+          loc, i256Ty, lhs, r.getDenseI64ArrayAttr({1}));
+      Value rhsAddr = r.create<LLVM::ExtractValueOp>(
+          loc, i256Ty, rhs, r.getDenseI64ArrayAttr({0}));
+      Value rhsSel = r.create<LLVM::ExtractValueOp>(
+          loc, i256Ty, rhs, r.getDenseI64ArrayAttr({1}));
+      Value addrCmp = bExt.genCmp(signlessPred, lhsAddr, rhsAddr);
+      Value selCmp = bExt.genCmp(signlessPred, lhsSel, rhsSel);
+      Value combined =
+          signlessPred == yul::CmpPredicate::eq
+              ? r.create<yul::AndOp>(loc, addrCmp, selCmp).getResult()
+              : r.create<yul::OrOp>(loc, addrCmp, selCmp).getResult();
+      r.replaceOp(op, combined);
+      return success();
+    }
     r.replaceOp(op, bExt.genCmp(signlessPred, lhs, rhs));
     return success();
   }
@@ -1354,8 +1370,8 @@ struct AllocaOpLowering : public OpConversionPattern<sol::AllocaOp> {
     mlir::solgen::BuilderExt bExt(r, op.getLoc());
 
     auto ptrTy = cast<sol::PointerType>(op.getAllocType());
-    Type convertedEltTy =
-        getTypeConverter()->convertType(ptrTy.getPointeeType());
+    Type pointeeTy = ptrTy.getPointeeType();
+    Type convertedEltTy = getTypeConverter()->convertType(pointeeTy);
 
     r.replaceOpWithNewOp<LLVM::AllocaOp>(
         op, LLVM::LLVMPointerType::get(r.getContext()), convertedEltTy,
@@ -1978,27 +1994,36 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
       return success();
     }
     case sol::DataLocation::Immutable: {
-      r.replaceOp(op, evmB.genLoad(addr, dataLoc));
+      Value ld = evmB.genLoad(addr, dataLoc);
+      if (isa<sol::ExtFuncRefType>(eltTy))
+        ld = evmB.genExtFuncUnpack(ld, /*inStorage=*/false, loc);
+      r.replaceOp(op, ld);
       return success();
     }
     case sol::DataLocation::CallData: {
-      auto ld = evmB.genLoad(addr, dataLoc);
+      Value ld = evmB.genLoad(addr, dataLoc);
+      if (isa<sol::ExtFuncRefType>(eltTy)) {
+        ld = evmB.genCleanup(eltTy, ld, loc, dataLoc);
+        r.replaceOp(op, evmB.genExtFuncUnpack(ld, /*inStorage=*/false, loc));
+        return success();
+      }
       if (isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
-          sol::isAddressLikeType(eltTy) || sol::isBytesLikeType(eltTy) ||
-          isa<sol::ExtFuncRefType>(eltTy))
+          sol::isAddressLikeType(eltTy) || sol::isBytesLikeType(eltTy))
         ld = evmB.genCleanup(eltTy, ld, loc, dataLoc);
 
       r.replaceOp(op, ld);
       return success();
     }
     case sol::DataLocation::Memory: {
-      auto ld = evmB.genLoad(addr, dataLoc);
+      Value ld = evmB.genLoad(addr, dataLoc);
       // old codegen begin
       // Only do cleanup for byte type. This matches the old codegen.
       // (Via-IR cleans every memory load).
       if (isa<sol::ByteType>(eltTy))
         ld = evmB.genCleanup(eltTy, ld, loc, dataLoc);
       // old codegen end
+      if (isa<sol::ExtFuncRefType>(eltTy))
+        ld = evmB.genExtFuncUnpack(ld, /*inStorage=*/false, loc);
 
       r.replaceOp(op, ld);
       return success();
@@ -2029,6 +2054,8 @@ struct LoadOpLowering : public OpConversionPattern<sol::LoadOp> {
       } else {
         // addr is just slot
         Value slotVal = genSlotLoad(addr);
+        if (isa<sol::ExtFuncRefType>(eltTy))
+          slotVal = evmB.genExtFuncUnpack(slotVal, /*inStorage=*/true, loc);
         r.replaceOp(op, slotVal);
       }
       return success();
@@ -2102,10 +2129,11 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         cast<sol::PointerType>(op.getAddr().getType()).getPointeeType();
 
     switch (dataLoc) {
-    case sol::DataLocation::Stack:
+    case sol::DataLocation::Stack: {
       r.replaceOpWithNewOp<LLVM::StoreOp>(op, remappedVal, remappedAddr,
                                           evm::getAlignment(remappedAddr));
       return success();
+    }
     case sol::DataLocation::Immutable:
     case sol::DataLocation::Memory: {
       // Generate mstore8 for storing to `bytes`.
@@ -2116,10 +2144,14 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         return success();
       }
 
-      if (isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
-          sol::isAddressLikeType(eltTy) || isa<sol::FixedBytesType>(eltTy) ||
-          isa<sol::ExtFuncRefType>(eltTy))
+      if (isa<sol::ExtFuncRefType>(eltTy)) {
+        remappedVal =
+            evmB.genExtFuncPack(remappedVal, /*inStorage=*/false, loc);
+      } else if (isa<IntegerType>(eltTy) || isa<sol::EnumType>(eltTy) ||
+                 sol::isAddressLikeType(eltTy) ||
+                 isa<sol::FixedBytesType>(eltTy)) {
         remappedVal = evmB.genCleanup(eltTy, remappedVal, loc);
+      }
 
       evmB.genStore(remappedVal, remappedAddr, dataLoc);
       r.eraseOp(op);
@@ -2144,8 +2176,11 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
         Value offset = r.create<LLVM::ExtractValueOp>(
             loc, i256Ty, remappedAddr, r.getDenseI64ArrayAttr({1}));
 
-        // Cleanup the value to be stored.
-        Value preparedVal = evmB.genCleanup(eltTy, remappedVal, loc);
+        // Cleanup the value to be stored. Skip for ext-fn-ref as upstream does
+        // the same (the cleanup happens at packing)
+        Value preparedVal = isa<sol::ExtFuncRefType>(eltTy)
+                                ? remappedVal
+                                : evmB.genCleanup(eltTy, remappedVal, loc);
         unsigned numBits;
         if (sol::isBytesLikeType(eltTy)) {
           // Bytes-like types: shr to convert from MSB-aligned to LSB-aligned.
@@ -2168,10 +2203,10 @@ struct StoreOpLowering : public OpConversionPattern<sol::StoreOp> {
           // FuncRef is 64 bits, already i256.
           numBits = 64;
         } else if (isa<sol::ExtFuncRefType>(eltTy)) {
-          // ExtFuncRef is MSB-aligned like bytes24. shr(64) to right-align.
+          // ExtFuncRef is bytes24 here.
           numBits = 192;
-          preparedVal = r.create<yul::ArithShrOp>(loc, preparedVal,
-                                                  bExt.genI256Const(64));
+          preparedVal =
+              evmB.genExtFuncPack(preparedVal, /*inStorage=*/true, loc);
         } else if (isa<sol::EnumType>(eltTy)) {
           // Enums can have at most 256 members, so always 1 byte.
           numBits = 8;
@@ -2332,7 +2367,11 @@ struct DataLocCastOpLowering : public OpConversionPattern<sol::DataLocCastOp> {
           evmB.genStore(memPtr, dstHeadSlot, sol::DataLocation::Memory);
         } else {
           Value cleanedResult =
-              evmB.genCleanup(memberTy, srcResult, loc, srcDataLoc);
+              isa<sol::ExtFuncRefType>(memberTy) &&
+                      isa<LLVM::LLVMStructType>(srcResult.getType())
+                  ? evmB.genExtFuncPack(srcResult,
+                                        /*inStorage=*/false, loc)
+                  : evmB.genCleanup(memberTy, srcResult, loc, srcDataLoc);
           evmB.genStore(cleanedResult, dstHeadSlot, sol::DataLocation::Memory);
         }
         if (i + 1 < numMembers)
@@ -3125,14 +3164,12 @@ struct ExtICallOpLowering : public OpConversionPattern<sol::ExtICallOp> {
     Location loc = op.getLoc();
     mlir::solgen::BuilderExt bExt(r, loc);
 
-    // Split MSB-aligned ext func ref into addr and selector:
-    // selector = (callee >> 64) & 0xffffffff; addr = callee >> 96
     Value callee = adaptor.getCallee();
-    Value shifted =
-        r.create<yul::ArithShrOp>(loc, callee, bExt.genI256Const(64));
-    Value selector = r.create<yul::AndOp>(
-        loc, shifted, bExt.genI256Const(APInt::getLowBitsSet(256, 32)));
-    Value addr = r.create<yul::ArithShrOp>(loc, shifted, bExt.genI256Const(32));
+    auto i256Ty = r.getIntegerType(256);
+    Value addr = r.create<LLVM::ExtractValueOp>(loc, i256Ty, callee,
+                                                r.getDenseI64ArrayAttr({0}));
+    Value selector = r.create<LLVM::ExtractValueOp>(
+        loc, i256Ty, callee, r.getDenseI64ArrayAttr({1}));
 
     // Get callee function type from the ext_func_ref type.
     auto extFuncRefTy = cast<sol::ExtFuncRefType>(op.getCallee().getType());
@@ -3583,9 +3620,12 @@ struct EmitOpLowering : public OpConversionPattern<sol::EmitOp> {
         continue;
       }
 
-      // Value-type indexed arg: cleanup-and-widen to i256 (LogOp expects
-      // i256 topics).
-      indexedArgs.push_back(evmB.genCleanup(origTy, val, loc));
+      // Value-type indexed arg: cleanup-and-widen to i256 (LogOp expects i256
+      // topics).
+      Value topic = isa<sol::ExtFuncRefType>(origTy)
+                        ? evmB.genExtFuncPack(val, /*inStorage=*/false, loc)
+                        : evmB.genCleanup(origTy, val, loc);
+      indexedArgs.push_back(topic);
     }
 
     for (Value arg : op.getNonIndexedArgs()) {

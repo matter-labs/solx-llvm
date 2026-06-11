@@ -998,13 +998,37 @@ Value evm::Builder::genCleanup(Type ty, Value val,
   }
 
   if (isa<sol::ExtFuncRefType>(ty)) {
-    APInt mask = APInt::getHighBitsSet(256, 192);
-    Value cleaned =
-        b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+    // This can be a bytes24 i256 word or struct<(i256,i256)> depending on the
+    // data-location source.
+    if (isa<IntegerType>(val.getType())) {
+      APInt mask = APInt::getHighBitsSet(256, 192);
+      Value cleaned =
+          b.create<yul::AndOp>(loc, val, bExt.genI256Const(mask, loc));
+      if (shouldRevert) {
+        Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, cleaned);
+        genRevert(revertCond, loc);
+      }
+      return cleaned;
+    }
+    auto i256Ty = b.getIntegerType(256);
+    Value addr = b.create<LLVM::ExtractValueOp>(loc, i256Ty, val,
+                                                b.getDenseI64ArrayAttr({0}));
+    Value sel = b.create<LLVM::ExtractValueOp>(loc, i256Ty, val,
+                                               b.getDenseI64ArrayAttr({1}));
+    Value addrCleaned = b.create<yul::AndOp>(
+        loc, addr, bExt.genI256Const(APInt::getLowBitsSet(256, 160), loc));
+    Value selCleaned = b.create<yul::AndOp>(
+        loc, sel, bExt.genI256Const(APInt::getLowBitsSet(256, 32), loc));
     if (shouldRevert) {
-      Value revertCond = bExt.genCmp(yul::CmpPredicate::ne, val, cleaned);
+      Value addrCmp = bExt.genCmp(yul::CmpPredicate::ne, addr, addrCleaned);
+      Value selCmp = bExt.genCmp(yul::CmpPredicate::ne, sel, selCleaned);
+      Value revertCond = b.create<yul::OrOp>(loc, addrCmp, selCmp);
       genRevert(revertCond, loc);
     }
+    Value cleaned = b.create<LLVM::InsertValueOp>(loc, val, addrCleaned,
+                                                  b.getDenseI64ArrayAttr({0}));
+    cleaned = b.create<LLVM::InsertValueOp>(loc, cleaned, selCleaned,
+                                            b.getDenseI64ArrayAttr({1}));
     return cleaned;
   }
 
@@ -1196,8 +1220,12 @@ Value evm::Builder::genMemAlloc(Type ty, bool zeroInit, ValueRange initVals,
       Value addr = dataPtr;
       for (auto val : initVals) {
         // Clean values before storing full memory words; array literals can
-        // carry dirty high bits in narrow element values.
-        b.create<yul::MStoreOp>(loc, addr, genCleanup(eltTy, val, loc));
+        // carry dirty high bits in narrow element values.  Note that
+        // genExtFuncPack generates the cleaned value.
+        Value stored = isa<sol::ExtFuncRefType>(eltTy)
+                           ? genExtFuncPack(val, /*inStorage=*/false, loc)
+                           : genCleanup(eltTy, val, loc);
+        b.create<yul::MStoreOp>(loc, addr, stored);
         addr = b.create<yul::AddOp>(loc, addr, bExt.genI256Const(32));
       }
     }
@@ -1625,9 +1653,68 @@ Value evm::Builder::genCleanupPackedStorageValue(
   }
 
   if (isa<sol::ExtFuncRefType>(eltTy))
-    return b.create<yul::ArithShlOp>(loc, value, bExt.genI256Const(64, loc));
+    return genExtFuncUnpack(value, /*inStorage=*/true, loc);
 
   llvm_unreachable("Unexpected type for cleanup of packed storage value");
+}
+
+Value evm::Builder::genExtFuncPack(Value extFuncStruct, bool inStorage,
+                                   std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+  auto i256Ty = b.getIntegerType(256);
+  Value addr = b.create<LLVM::ExtractValueOp>(loc, i256Ty, extFuncStruct,
+                                              b.getDenseI64ArrayAttr({0}));
+  Value sel = b.create<LLVM::ExtractValueOp>(loc, i256Ty, extFuncStruct,
+                                             b.getDenseI64ArrayAttr({1}));
+  // via-ir and legacy does:
+  //   combined := shl(64, or(shl(32, addr), and(sel, 0xffffffff)))
+  // to get MSB form + the cleanup, where:
+  // MSB form: | addr(160) | sel(32) | zeros(64) |.
+  Value selMasked = b.create<yul::AndOp>(
+      loc, sel, bExt.genI256Const(APInt::getLowBitsSet(256, 32), loc));
+  Value addrShifted =
+      b.create<yul::ArithShlOp>(loc, addr, bExt.genI256Const(32));
+  Value combined = b.create<yul::OrOp>(loc, addrShifted, selMasked);
+  Value msb = b.create<yul::ArithShlOp>(loc, combined, bExt.genI256Const(64));
+  if (!inStorage)
+    return msb;
+
+  // LSB form: | zeros(64) | addr(160) | sel(32) |.
+  return b.create<yul::ArithShrOp>(loc, msb, bExt.genI256Const(64));
+}
+
+Value evm::Builder::genExtFuncUnpack(Value word, bool inStorage,
+                                     std::optional<Location> locArg) {
+  Location loc = locArg ? *locArg : defLoc;
+  mlir::solgen::BuilderExt bExt(b, loc);
+  auto i256Ty = b.getIntegerType(256);
+  auto structTy =
+      LLVM::LLVMStructType::getLiteral(b.getContext(), {i256Ty, i256Ty});
+
+  Value addr, sel;
+  if (inStorage) {
+    // LSB form: | zeros(64) | addr(160) | sel(32) |.
+    sel = b.create<yul::AndOp>(
+        loc, word, bExt.genI256Const(APInt::getLowBitsSet(256, 32)));
+    Value addrShifted =
+        b.create<yul::ArithShrOp>(loc, word, bExt.genI256Const(32));
+    addr = b.create<yul::AndOp>(
+        loc, addrShifted, bExt.genI256Const(APInt::getLowBitsSet(256, 160)));
+  } else {
+    // MSB form: | addr(160) | sel(32) | zeros(64) |.
+    addr = b.create<yul::ArithShrOp>(loc, word, bExt.genI256Const(96));
+    Value selShifted =
+        b.create<yul::ArithShrOp>(loc, word, bExt.genI256Const(64));
+    sel = b.create<yul::AndOp>(
+        loc, selShifted, bExt.genI256Const(APInt::getLowBitsSet(256, 32)));
+  }
+
+  Value undef = b.create<LLVM::UndefOp>(loc, structTy);
+  Value withAddr = b.create<LLVM::InsertValueOp>(loc, undef, addr,
+                                                 b.getDenseI64ArrayAttr({0}));
+  return b.create<LLVM::InsertValueOp>(loc, withAddr, sel,
+                                       b.getDenseI64ArrayAttr({1}));
 }
 
 Value evm::Builder::genLoad(Value addr, sol::DataLocation dataLoc,
@@ -1955,7 +2042,8 @@ void evm::Builder::genClearStorageValue(Type ty, Value slot, Location loc) {
   if (auto arrTy = dyn_cast<sol::ArrayType>(ty)) {
     if (arrTy.isDynSized()) {
       Value oldLen = genLoad(slot, sol::DataLocation::Storage, loc);
-      genStore(bExt.genI256Const(0, loc), slot, sol::DataLocation::Storage, loc);
+      genStore(bExt.genI256Const(0, loc), slot, sol::DataLocation::Storage,
+               loc);
       genClearStorageArrayTail(slot, arrTy, bExt.genI256Const(0, loc), oldLen,
                                /*isDecrement=*/false, loc);
     } else if (sol::hasDynamicallySizedElt(arrTy.getEltType())) {
@@ -2021,8 +2109,7 @@ void evm::Builder::genClearStorageArrayTail(Value arraySlot,
 
   Type eltTy = arrTy.getEltType();
   // Multiple elements share one slot when byteSize <= 16 (elemsPerSlot >= 2).
-  bool trulyPacked =
-      sol::canBePacked(eltTy) && sol::getNumBytes(eltTy) <= 16;
+  bool trulyPacked = sol::canBePacked(eltTy) && sol::getNumBytes(eltTy) <= 16;
 
   yul::IfOp ifClear = nullptr;
   if (!isDecrement) {
@@ -2936,7 +3023,13 @@ Value evm::Builder::genABIEncodingImpl(
   // Scalar
   if (sol::isScalar(ty)) {
     unsigned numBytes = sol::getNumBytes(ty);
-    Value cleaned = genCleanup(ty, src, loc, srcDataLoc);
+    // For ext-func-ref, struct-form src (top-level / storage-packed reader)
+    // packs to MSB word; raw-word src (memory/calldata reader) flows through
+    // genCleanup's bytes24 path.
+    Value cleaned =
+        isa<sol::ExtFuncRefType>(ty) && isa<LLVM::LLVMStructType>(src.getType())
+            ? genExtFuncPack(src, /*inStorage=*/false, loc)
+            : genCleanup(ty, src, loc, srcDataLoc);
     // Right-aligned types need a left-shift in packed mode so their bytes
     // land at the low memory address after mstore.
     if (!opts.padded && !sol::isLeftAligned(ty) && numBytes < 32)
@@ -3503,6 +3596,9 @@ void evm::Builder::genABITupleDecoding(TypeRange tys, Value tupleStart,
       results.push_back(genABITupleDecoding(ty, headAddr, fromMem, tupleStart,
                                             tupleEnd, loc));
     }
+    if (isa<sol::ExtFuncRefType>(ty))
+      results.back() =
+          genExtFuncUnpack(results.back(), /*inStorage=*/false, loc);
     headAddr = b.create<yul::AddOp>(loc, headAddr,
                                     bExt.genI256Const(getCallDataHeadSize(ty)));
   }
