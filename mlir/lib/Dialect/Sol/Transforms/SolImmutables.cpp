@@ -23,22 +23,24 @@ using namespace mlir;
 void evm::lowerSetImmutables(ModuleOp mod,
                              llvm::StringMap<SmallVector<uint64_t>> immMap) {
   mod.walk([&](LLVM::SetImmutableOp immOp) {
+    // An immutable the runtime never loads has no reserved offsets and its set
+    // is dead; skip storing for those. Always erase so it never reaches LLVM.
     auto it = immMap.find(immOp.getName());
-    assert(it != immMap.end());
-    for (uint64_t offset : it->second) {
+    if (it != immMap.end()) {
       Location loc = immOp.getLoc();
       OpBuilder b(immOp);
       evm::Builder evmB(mod, b, loc);
-
       auto i256Ty = IntegerType::get(b.getContext(), 256);
-      auto offsetConst = b.create<LLVM::ConstantOp>(
-          loc, i256Ty, IntegerAttr::get(i256Ty, offset));
-      Value addr = evmB.genHeapPtr(
-          b.create<LLVM::AddOp>(loc, immOp.getAddr(), offsetConst));
-      b.create<LLVM::StoreOp>(loc, immOp.getVal(), addr,
-                              evm::getAlignment(addr));
-      immOp.erase();
+      for (uint64_t offset : it->second) {
+        auto offsetConst = b.create<LLVM::ConstantOp>(
+            loc, i256Ty, IntegerAttr::get(i256Ty, offset));
+        Value addr = evmB.genHeapPtr(
+            b.create<LLVM::AddOp>(loc, immOp.getAddr(), offsetConst));
+        b.create<LLVM::StoreOp>(loc, immOp.getVal(), addr,
+                                evm::getAlignment(addr));
+      }
     }
+    immOp.erase();
   });
 }
 
