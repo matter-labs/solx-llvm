@@ -13,6 +13,7 @@
 #ifndef MLIR_DIALECT_SOL_SOL_H_
 #define MLIR_DIALECT_SOL_SOL_H_
 
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Types.h"
@@ -79,6 +80,13 @@ bool canBePacked(mlir::Type ty);
 /// Returns the byte width of a packable scalar type (its size when not
 /// 32B-padded). Used by both storage layout and ABI packed encoding.
 unsigned getNumBytes(mlir::Type ty);
+
+/// Materialises the Solidity default value for `ty` at the builder's current
+/// insertion point. Handles every type that can appear as a function return:
+/// integers, address/contract, fixedbytes/byte, enum, func-ref, ext-func-ref,
+/// and aggregates (array/struct/string) in any data location. Aggregates in
+/// memory emit a `sol.malloc` (runtime alloc); the rest are pure.
+Value emitZeroedVal(OpBuilder &b, Type ty, Location loc);
 
 ///
 /// The following functions are used to query the capabilities of the specified

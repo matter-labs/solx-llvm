@@ -139,11 +139,16 @@ struct ModifierOpLoweringPass
     if (modifierFnTy.getNumResults() != 0) {
       retAddrs.reserve(modifierFnTy.getNumResults());
       b.setInsertionPointToStart(&modifierFn.getBlocks().front());
+      Location loc = modifierFn.getLoc();
       for (Type resultTy : modifierFnTy.getResults()) {
-        retAddrs.push_back(b.create<sol::AllocaOp>(
-            modifierFn.getLoc(),
-            sol::PointerType::get(b.getContext(), resultTy,
-                                  sol::DataLocation::Stack)));
+        auto retAddr = b.create<sol::AllocaOp>(
+            loc, sol::PointerType::get(b.getContext(), resultTy,
+                                       sol::DataLocation::Stack));
+        // Default-init so paths that reach sol.return without going through
+        // sol.placeholder still produce Solidity defaults (issue #114).
+        Value zero = sol::emitZeroedVal(b, resultTy, loc);
+        b.create<sol::StoreOp>(loc, zero, retAddr);
+        retAddrs.push_back(retAddr);
       }
     }
 

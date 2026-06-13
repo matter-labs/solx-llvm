@@ -39,6 +39,16 @@ MLIR_CAPI_EXPORTED MlirType mlirSolGetEltType(MlirType ty,
 MLIR_CAPI_EXPORTED MlirType mlirSolGepGetResultType(MlirType baseAddrTy,
                                                     MlirType elementType);
 
+/// Emits the Solidity default value for `ty` into `block`. If `insertBefore`
+/// is non-null, the ops are inserted before it; otherwise they are appended
+/// to the end of `block`. Returns the value carrying the default. May emit
+/// multiple ops (e.g. constant + cast chain, or a `sol.malloc` for memory
+/// aggregates).
+MLIR_CAPI_EXPORTED MlirValue mlirSolEmitZeroedVal(MlirBlock block,
+                                                  MlirOperation insertBefore,
+                                                  MlirType ty,
+                                                  MlirLocation loc);
+
 #ifdef __cplusplus
 }
 #endif

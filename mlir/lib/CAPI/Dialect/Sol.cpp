@@ -35,3 +35,14 @@ MlirType mlirSolGepGetResultType(MlirType baseAddrTy, MlirType elementType) {
   return wrap(
       mlir::sol::GepOp::getResultType(unwrap(baseAddrTy), unwrap(elementType)));
 }
+
+MlirValue mlirSolEmitZeroedVal(MlirBlock block, MlirOperation insertBefore,
+                               MlirType ty, MlirLocation loc) {
+  mlir::Block *blk = unwrap(block);
+  mlir::OpBuilder b(unwrap(ty).getContext());
+  if (!mlirOperationIsNull(insertBefore))
+    b.setInsertionPoint(unwrap(insertBefore));
+  else
+    b.setInsertionPointToEnd(blk);
+  return wrap(mlir::sol::emitZeroedVal(b, unwrap(ty), unwrap(loc)));
+}
