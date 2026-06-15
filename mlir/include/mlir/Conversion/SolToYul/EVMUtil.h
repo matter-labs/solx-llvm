@@ -369,6 +369,10 @@ public:
                            bool isDecrement = false,
                            std::optional<mlir::Location> locArg = std::nullopt);
 
+  /// Recursively zeros the storage occupied by a value of type \p ty at \p slot.
+  void genClearStorageValue(mlir::Type ty, mlir::Value slot,
+                            mlir::Location loc);
+
   /// Copies a string from \p src (any data location encoded in \p ty) to the
   /// storage slot \p dstAddr, handling in-place / out-of-place encoding and
   /// zeroing storage slots no longer needed by the new value.
