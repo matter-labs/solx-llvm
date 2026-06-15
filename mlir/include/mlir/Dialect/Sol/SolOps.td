@@ -363,6 +363,20 @@ def Sol_CopyOp : Sol_Op<"copy"> {
   }];
 }
 
+def Sol_DeleteOp : Sol_Op<"delete"> {
+  let summary = "Resets a reference-typed storage variable to its zero value";
+  let description = [{
+    Recursively clears the storage occupied by the reference-typed value rooted
+    at the given `Storage` reference (Solidity `delete x`): dynamic arrays/strings
+    reset to empty, fixed arrays and structs recurse into their elements/members.
+  }];
+  let arguments = (ins AnyType:$reference);
+
+  let assemblyFormat = [{
+    $reference attr-dict `:` type($reference)
+  }];
+}
+
 // TODO: Simplify the asm format by inferring element type of Sol_RefType.
 
 def Sol_LoadOp : Sol_Op<"load", [
