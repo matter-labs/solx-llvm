@@ -1181,6 +1181,12 @@ def Sol_ReturnOp : Sol_Op<"return", [Pure, Terminator]> {
 def Sol_FuncOp : Sol_Op<"func", [AutomaticAllocationScope, CallableOpInterface,
                                  FunctionOpInterface, IsolatedFromAbove,
                                  Symbol]> {
+  // TODO: Verifier should check if
+  // - fallback fn type is either `() -> ()`
+  // or `(!sol.string<Calldata>) -> (!sol.string<Memory>)`
+  // - receive fn type is `() -> ()`
+  // - orig_fn_type is set for interface-fn and constructor kinds
+
   let arguments = (ins SymbolNameAttr:$sym_name,
                        TypeAttrOf<FunctionType>:$function_type,
                        OptionalAttr<DictArrayAttr>:$arg_attrs,

@@ -4207,8 +4207,7 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
 
     // Generate fallback function.
     if (fallbackFn) {
-      // Use the pre-lowering signature: the live type may already be lowered.
-      FunctionType fallbackFnTy = *fallbackFn.getOrigFnType();
+      FunctionType fallbackFnTy = fallbackFn.getFunctionType();
       // Both valid fallback forms (with and without bytes) match counts.
       assert(fallbackFnTy.getNumInputs() == fallbackFnTy.getNumResults() &&
              "fallback has mismatched parameter/return counts");
@@ -4232,9 +4231,9 @@ struct ContractOpLowering : public OpRewritePattern<sol::ContractOp> {
         // The returned `bytes memory` is returned verbatim (not ABI-encoded),
         // i.e. `return(add(ret, 0x20), mload(ret))`.
         Value ret = call.getResult(0);
-        Type retTy = fallbackFnTy.getResult(0);
-        Value dataPtr = evmB.genDataAddrPtr(ret, sol::DataLocation::Memory, loc);
-        Value len = evmB.genDynSize(ret, retTy, loc);
+        Value dataPtr =
+            evmB.genDataAddrPtr(ret, sol::DataLocation::Memory, loc);
+        Value len = r.create<yul::MLoadOp>(loc, ret);
         r.create<yul::ReturnOp>(loc, dataPtr, len);
       } else {
         r.create<yul::StopOp>(loc);
