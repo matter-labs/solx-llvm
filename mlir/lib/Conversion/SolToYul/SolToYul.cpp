@@ -425,6 +425,36 @@ struct DynBytesToFixedBytesOpLowering
   }
 };
 
+struct FixedBytesIndexOpLowering
+    : public OpConversionPattern<sol::FixedBytesIndexOp> {
+  using OpConversionPattern<sol::FixedBytesIndexOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::FixedBytesIndexOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
+
+    unsigned numBytes =
+        cast<sol::FixedBytesType>(op.getValue().getType()).getSize();
+    Value idx = adaptor.getIndex();
+    Value val = adaptor.getValue();
+
+    // Bounds check, mirroring the legacy codegen: index >= numBytes panics
+    // with ArrayOutOfBounds.
+    Value oob = bExt.genCmp(yul::CmpPredicate::uge, idx,
+                            bExt.genI256Const(numBytes, loc), loc);
+    evmB.genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, oob, loc);
+
+    // `byte(idx, val)` extracts the idx-th byte (from the MSB) right-aligned;
+    // shift it left by 248 bits to left-align it as a bytes1 value.
+    Value byteVal = r.create<yul::ByteOp>(loc, idx, val);
+    Value res = r.create<yul::ShlOp>(loc, bExt.genI256Const(248, loc), byteVal);
+    r.replaceOp(op, res);
+    return success();
+  }
+};
+
 // old codegen begin
 // (Via-IR cleans output of these ops).
 /// A templatized version of a conversion pattern for lowering add, sub, mul
@@ -4284,8 +4314,9 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            DefaultFuncConstantOpLowering>(pats.getContext());
   pats.add<CastOpLowering, AddressCastOpLowering, ContractCastOpLowering,
            EnumCastOpLowering, BytesCastOpLowering,
-           DynBytesToFixedBytesOpLowering, ExtFuncConstantOpLowering,
-           ExtFuncAddrOpLowering, ExtFuncSelectorOpLowering,
+           DynBytesToFixedBytesOpLowering, FixedBytesIndexOpLowering,
+           ExtFuncConstantOpLowering, ExtFuncAddrOpLowering,
+           ExtFuncSelectorOpLowering,
            ArithBinOpLowering<sol::AddOp, yul::AddOp>,
            ArithBinOpLowering<sol::SubOp, yul::SubOp>,
            ArithBinOpLowering<sol::MulOp, yul::MulOp>,
