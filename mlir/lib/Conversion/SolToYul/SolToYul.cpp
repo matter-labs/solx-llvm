@@ -4323,8 +4323,12 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            ArithBinOpLowering<sol::AndOp, yul::AndOp>,
            ArithBinOpLowering<sol::OrOp, yul::OrOp>,
            ArithBinOpLowering<sol::XorOp, yul::XOrOp>, NotOpLowering,
-           DivOrModOpLowering<sol::DivOp, yul::ArithSDivOp, yul::ArithDivOp>,
-           DivOrModOpLowering<sol::ModOp, yul::ArithSModOp, yul::ArithModOp>,
+           // Signed div/mod use the EVM sdiv/smod ops (defined wrapping on
+           // INT_MIN/-1) rather than the arith family, whose LLVM sdiv/srem are
+           // UB on that overflow. Unsigned has no such overflow, so the arith
+           // ops are fine there (div-by-zero is guarded by genPanic).
+           DivOrModOpLowering<sol::DivOp, yul::SDivOp, yul::ArithDivOp>,
+           DivOrModOpLowering<sol::ModOp, yul::SModOp, yul::ArithModOp>,
            ExpOpLowering, ShrOpLowering, ShlOpLowering, CmpOpLowering,
            AddModOpLowering, MulModOpLowering>(tyConv, pats.getContext());
 }
