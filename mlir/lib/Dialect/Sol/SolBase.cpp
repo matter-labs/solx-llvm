@@ -16,6 +16,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -215,7 +216,10 @@ unsigned mlir::sol::getStorageSlotCount(Type ty) {
       return 1;
 
     Type eltTy = arrTy.getEltType();
-    unsigned size = arrTy.getSize();
+    // FIXME: For now, limit the number of elements in statically sized arrays.
+    assert(arrTy.getSize().getActiveBits() <= 32 &&
+           "NYI: getStorageSlotCount for huge static arrays");
+    unsigned size = static_cast<unsigned>(arrTy.getSize().getZExtValue());
     if (!canBePacked(eltTy))
       return size * getStorageSlotCount(eltTy);
 
@@ -302,10 +306,24 @@ Type ArrayType::parse(AsmParser &parser) {
   if (parser.parseLess())
     return {};
 
-  int64_t size = -1;
+  // size ::= '?' (dynamic) | integer (static, possibly > INT64_MAX)
+  std::optional<llvm::APInt> sizeOpt = std::nullopt;
   if (parser.parseOptionalQuestion()) {
-    if (parser.parseInteger(size))
+    // '?' not found: parse a static integer
+    SMLoc sizeLoc = parser.getCurrentLocation();
+    llvm::APInt rawSize;
+    if (parser.parseInteger(rawSize))
       return {};
+    if (rawSize.isNegative()) {
+      parser.emitError(sizeLoc, "array size must be non-negative");
+      return {};
+    }
+    if (rawSize.getActiveBits() > 256) {
+      parser.emitError(sizeLoc, "array size too large, maximum is 2^256 - 1");
+      return {};
+    }
+    // Normalize to 256 bits (the canonical width for Sol_ArrayType sizes).
+    sizeOpt = rawSize.zextOrTrunc(256);
   }
 
   if (parser.parseKeyword("x"))
@@ -325,20 +343,35 @@ Type ArrayType::parse(AsmParser &parser) {
   if (parser.parseGreater())
     return {};
 
-  return get(parser.getContext(), size, eleTy, dataLocation);
+  return get(parser.getContext(), sizeOpt, eleTy, dataLocation);
 }
 
 /// Prints a sol.array type.
 void ArrayType::print(AsmPrinter &printer) const {
   printer << "<";
 
-  if (getSize() == -1)
+  if (isDynSized())
     printer << "?";
   else
-    printer << getSize();
+    getSize().print(printer.getStream(), /*isSigned=*/false);
 
   printer << " x " << getEltType() << ", "
           << stringifyDataLocation(getDataLocation()) << ">";
+}
+
+/// Sizes that exceed uint64_t are only valid for storage/transient arrays;
+/// for all other locations getSize().getZExtValue() must be safe.
+llvm::LogicalResult
+ArrayType::verify(llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
+                  std::optional<llvm::APInt> sizeOpt, Type,
+                  DataLocation dataLocation) {
+  if (!sizeOpt.has_value())
+    return mlir::success();
+  bool isStorage = dataLocation == DataLocation::Storage ||
+                   dataLocation == DataLocation::Transient;
+  if (!isStorage && sizeOpt->getActiveBits() > 64)
+    return emitError() << "array size exceeds uint64 for non-storage array";
+  return mlir::success();
 }
 
 //===----------------------------------------------------------------------===//
