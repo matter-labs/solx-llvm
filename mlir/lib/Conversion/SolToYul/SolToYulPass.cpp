@@ -189,7 +189,20 @@ struct ConvertSolToYulPass
         sol::WhileOp,
         sol::DoWhileOp,
         sol::ForOp,
-        sol::TryOp
+        sol::TryOp,
+        sol::InlineAsmOp,
+        yul::AllocaOp,
+        yul::LoadOp,
+        yul::StoreOp,
+        sol::YulPtrCastOp,
+        sol::YulStorageSlotOp,
+        sol::YulCallDataOffsetOp,
+        sol::YulCallDataLengthOp,
+        sol::YulSelectorOp,
+        sol::YulFuncAddrOp,
+        sol::YulStorageOffsetOp,
+        sol::YulStateVarSlotOp,
+        sol::YulStateVarOffsetOp
         // clang-format on
         >();
     convTgt.addDynamicallyLegalOp<sol::FuncOp>([&](sol::FuncOp op) {

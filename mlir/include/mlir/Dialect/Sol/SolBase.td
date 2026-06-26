@@ -161,6 +161,25 @@ def Sol_AggType : AnyTypeOf<[Sol_StringType, Sol_ArrayType, Sol_StructType],
 def Sol_RefType : AnyTypeOf<[Sol_PtrType, Sol_AggType],
                              "Solidity aggregate types and pointers">;
 
+def Sol_YulPtr : Type<CPred<"::mlir::isa<::mlir::yul::PtrType>($_self)">,
+                      "!yul.ptr">;
+
+def Sol_AnyStackPtr : Type<
+  CPred<"::mlir::sol::isStackPtr($_self)">,
+  "sol.ptr<*, Stack>">;
+
+def Sol_StorageRefStackPtr : Type<
+  CPred<"::mlir::sol::isStackPtrToStorageRef($_self)">,
+  "sol.ptr to a Storage/Transient-located ref-type, on the Stack">;
+
+def Sol_DynCallDataStackPtr : Type<
+  CPred<"::mlir::sol::isStackPtrToDynCallData($_self)">,
+  "sol.ptr to a dynamically-sized CallData ref-type, on the Stack">;
+
+def Sol_ExtFuncRefStackPtr : Type<
+  CPred<"::mlir::sol::isStackPtrToExtFuncRef($_self)">,
+  "sol.ptr to a sol.ext_func_ref, on the Stack">;
+
 // This represents a reference to a function in the context of indirect call.
 def Sol_FuncRefType : Sol_Type<"FuncRef", "func_ref"> {
   let parameters = (ins "FunctionType":$funcTy);

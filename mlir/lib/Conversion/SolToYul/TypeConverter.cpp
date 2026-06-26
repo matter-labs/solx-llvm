@@ -14,6 +14,7 @@
 #include "mlir/Conversion/SolToYul/SolToYul.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Sol/Sol.h"
+#include "mlir/Dialect/Yul/Yul.h"
 
 using namespace mlir;
 
@@ -67,9 +68,12 @@ evm::SolTypeConverter::SolTypeConverter() {
 
   // External function ref type
   addConversion([&](sol::ExtFuncRefType ty) -> Type {
-    // MSB-aligned i256 like bytes24:
-    // | addr (160) | selector (32) | zeros (64) |
-    return IntegerType::get(ty.getContext(), 256, IntegerType::Signless);
+    // {addr, selector} with each half LSB-aligned in its i256 lane. Mirrors
+    // upstream Yul's two-stack-item layout. Packing into a 32-byte word
+    // (MSB-aligned for memory/calldata/ABI, right-aligned 192 bits for
+    // storage) happens at the location boundary.
+    auto i256Ty = IntegerType::get(ty.getContext(), 256, IntegerType::Signless);
+    return LLVM::LLVMStructType::getLiteral(ty.getContext(), {i256Ty, i256Ty});
   });
 
   // Function type
@@ -198,6 +202,11 @@ evm::SolTypeConverter::SolTypeConverter() {
     }
 
     llvm_unreachable("Unimplemented type conversion");
+  });
+
+  // Yul pointer type
+  addConversion([](yul::PtrType ty) -> Type {
+    return LLVM::LLVMPointerType::get(ty.getContext());
   });
 
   addSourceMaterialization(

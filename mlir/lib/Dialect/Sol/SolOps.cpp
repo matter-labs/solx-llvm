@@ -13,6 +13,7 @@
 #include "mlir/Dialect/CommonFolders.h"
 #include "mlir/Dialect/Sol/Sol.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Dialect/Yul/Yul.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OpImplementation.h"

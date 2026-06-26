@@ -48,6 +48,21 @@ bool hasDynamicallySizedElt(Type ty);
 /// Returns true if the type is a reference type but not a pointer type.
 bool isNonPtrRefType(Type ty);
 
+/// Returns true if the type is a stack pointer (a `sol.ptr<_, Stack>`).
+bool isStackPtr(Type type);
+
+/// Returns true if the type is a stack pointer to a non-ptr storage/transient
+/// reference type.
+bool isStackPtrToStorageRef(Type type);
+
+/// Returns true if the type is a stack pointer to a dynamically-sized
+/// calldata reference type.
+bool isStackPtrToDynCallData(Type type);
+
+/// Returns true if the type is a stack pointer to an external function
+/// reference type.
+bool isStackPtrToExtFuncRef(Type type);
+
 /// Returns the element type of a non mapping reference type.
 Type getEltType(Type ty, Index structTyIdx = 0);
 
