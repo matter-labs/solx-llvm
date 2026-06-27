@@ -4292,8 +4292,8 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            ArithBinOpLowering<sol::AndOp, yul::AndOp>,
            ArithBinOpLowering<sol::OrOp, yul::OrOp>,
            ArithBinOpLowering<sol::XorOp, yul::XOrOp>, NotOpLowering,
-           DivOrModOpLowering<sol::DivOp, yul::ArithSDivOp, yul::ArithDivOp>,
-           DivOrModOpLowering<sol::ModOp, yul::ArithSModOp, yul::ArithModOp>,
+           DivOrModOpLowering<sol::DivOp, yul::SDivOp, yul::ArithDivOp>,
+           DivOrModOpLowering<sol::ModOp, yul::SModOp, yul::ArithModOp>,
            ExpOpLowering, ShrOpLowering, ShlOpLowering, CmpOpLowering,
            AddModOpLowering, MulModOpLowering>(tyConv, pats.getContext());
 }
