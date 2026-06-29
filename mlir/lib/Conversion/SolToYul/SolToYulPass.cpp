@@ -100,6 +100,7 @@ struct ConvertSolToYulPass
         sol::EnumCastOp,
         sol::BytesCastOp,
         sol::DynBytesToFixedBytesOp,
+        sol::FixedBytesIndexOp,
         sol::AddOp,
         sol::SubOp,
         sol::MulOp,

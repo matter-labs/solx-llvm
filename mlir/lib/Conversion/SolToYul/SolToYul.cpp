@@ -425,6 +425,36 @@ struct DynBytesToFixedBytesOpLowering
   }
 };
 
+struct FixedBytesIndexOpLowering
+    : public OpConversionPattern<sol::FixedBytesIndexOp> {
+  using OpConversionPattern<sol::FixedBytesIndexOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(sol::FixedBytesIndexOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &r) const override {
+    Location loc = op.getLoc();
+    mlir::solgen::BuilderExt bExt(r, loc);
+    evm::Builder evmB(getModule(op), r, loc);
+
+    unsigned numBytes =
+        cast<sol::FixedBytesType>(op.getValue().getType()).getSize();
+    Value idx = adaptor.getIndex();
+    Value val = adaptor.getValue();
+
+    // Bounds check, mirroring the legacy codegen: index >= numBytes panics
+    // with ArrayOutOfBounds.
+    Value oob = bExt.genCmp(yul::CmpPredicate::uge, idx,
+                            bExt.genI256Const(numBytes, loc), loc);
+    evmB.genPanic(mlir::evm::PanicCode::ArrayOutOfBounds, oob, loc);
+
+    // `byte(idx, val)` extracts the idx-th byte (from the MSB) right-aligned;
+    // shift it left by 248 bits to left-align it as a bytes1 value.
+    Value byteVal = r.create<yul::ByteOp>(loc, idx, val);
+    Value res = r.create<yul::ShlOp>(loc, bExt.genI256Const(248, loc), byteVal);
+    r.replaceOp(op, res);
+    return success();
+  }
+};
+
 // old codegen begin
 // (Via-IR cleans output of these ops).
 /// A templatized version of a conversion pattern for lowering add, sub, mul
@@ -4284,16 +4314,21 @@ void evm::populateArithPats(RewritePatternSet &pats, TypeConverter &tyConv) {
            DefaultFuncConstantOpLowering>(pats.getContext());
   pats.add<CastOpLowering, AddressCastOpLowering, ContractCastOpLowering,
            EnumCastOpLowering, BytesCastOpLowering,
-           DynBytesToFixedBytesOpLowering, ExtFuncConstantOpLowering,
-           ExtFuncAddrOpLowering, ExtFuncSelectorOpLowering,
+           DynBytesToFixedBytesOpLowering, FixedBytesIndexOpLowering,
+           ExtFuncConstantOpLowering, ExtFuncAddrOpLowering,
+           ExtFuncSelectorOpLowering,
            ArithBinOpLowering<sol::AddOp, yul::AddOp>,
            ArithBinOpLowering<sol::SubOp, yul::SubOp>,
            ArithBinOpLowering<sol::MulOp, yul::MulOp>,
            ArithBinOpLowering<sol::AndOp, yul::AndOp>,
            ArithBinOpLowering<sol::OrOp, yul::OrOp>,
            ArithBinOpLowering<sol::XorOp, yul::XOrOp>, NotOpLowering,
-           DivOrModOpLowering<sol::DivOp, yul::ArithSDivOp, yul::ArithDivOp>,
-           DivOrModOpLowering<sol::ModOp, yul::ArithSModOp, yul::ArithModOp>,
+           // Signed div/mod use the EVM sdiv/smod ops (defined wrapping on
+           // INT_MIN/-1) rather than the arith family, whose LLVM sdiv/srem are
+           // UB on that overflow. Unsigned has no such overflow, so the arith
+           // ops are fine there (div-by-zero is guarded by genPanic).
+           DivOrModOpLowering<sol::DivOp, yul::SDivOp, yul::ArithDivOp>,
+           DivOrModOpLowering<sol::ModOp, yul::SModOp, yul::ArithModOp>,
            ExpOpLowering, ShrOpLowering, ShlOpLowering, CmpOpLowering,
            AddModOpLowering, MulModOpLowering>(tyConv, pats.getContext());
 }

@@ -114,6 +114,27 @@ def Sol_DynBytesToFixedBytesOp : Sol_Op<"dyn_bytes_to_fixedbytes"> {
   let assemblyFormat = "$inp attr-dict `:` type($inp) `to` type($out)";
 }
 
+def Sol_FixedBytes1Type: Type<
+  CPred<"::llvm::isa<::mlir::sol::FixedBytesType>($_self) && "
+        "::llvm::cast<::mlir::sol::FixedBytesType>($_self).getSize() == 1">,
+  "!sol.fixedbytes<1>">;
+
+def Sol_FixedBytesIndexOp : Sol_Op<"fixed_bytes_index"> {
+  let summary = "Extracts the byte at the given index from a fixed-bytes value";
+  let description = [{
+    Yields `value[index]` as a `bytes1`: the index-th byte counted from the
+    most significant byte, left-aligned in the result word. An out-of-bounds
+    index (>= the byte width of `value`) raises `Panic(0x32)`.
+  }];
+  let arguments = (ins Sol_FixedBytesType:$value, AnyInteger:$index);
+  let results = (outs Sol_FixedBytes1Type:$result);
+
+  let assemblyFormat = [{
+    $value `[` $index `]` attr-dict `:` qualified(type($value)) `,` type($index)
+    `->` qualified(type($result))
+  }];
+}
+
 // TODO: Add folders for the c0 case.
 
 // Checked arith ops are not speculatable, but unchecked are (including div and
